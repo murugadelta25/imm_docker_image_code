@@ -188,16 +188,25 @@ export default function Dashboard() {
       const params = buildParams();
       const rtParams = buildRealtimeParams(viewMode, params, filters);
       const searchTerm = params.search || '';
-
-      const [e, s, p, m, rt] = await Promise.all([
-        api.get('/api/oee/', { params }),
-        api.get('/api/oee/summary', { params }),
-        api.get('/api/stations/'),
-        api.get('/api/machines/'),
-        api.get('/api/oee/realtime', { params: rtParams }).catch(() => ({ data: [] })),
+      // Longer timeout + allSettled so one slow endpoint does not blank the whole dashboard
+      const slow = { timeout: 60000 };
+      const settled = await Promise.allSettled([
+        api.get('/api/oee/', { params, ...slow }),
+        api.get('/api/oee/summary', { params, ...slow }),
+        api.get('/api/stations/', slow),
+        api.get('/api/machines/', slow),
+        api.get('/api/oee/realtime', { params: rtParams, ...slow }),
       ]);
-      const manualEntries = (Array.isArray(e.data) ? e.data : []);
-      const realtimeEntries = (Array.isArray(rt.data) ? rt.data : [])
+      const val = (i, fallback) =>
+        (settled[i].status === 'fulfilled' ? settled[i].value?.data : fallback);
+      settled.forEach((r, i) => {
+        if (r.status === 'rejected') {
+          console.warn(`Dashboard fetch partial fail [${i}]:`, r.reason?.message || r.reason);
+        }
+      });
+
+      const manualEntries = Array.isArray(val(0, [])) ? val(0, []) : [];
+      const realtimeEntries = (Array.isArray(val(4, [])) ? val(4, []) : [])
         .filter((row) => matchesSearch(row, searchTerm));
 
       const manualKeys = new Set(
@@ -208,9 +217,9 @@ export default function Dashboard() {
       );
 
       setEntries([...manualEntries, ...uniqueRt]);
-      setSummary(s.data || null);
-      setStations(Array.isArray(p.data) ? p.data : []);
-      setMachines(Array.isArray(m.data) ? m.data : []);
+      setSummary(val(1, null));
+      setStations(Array.isArray(val(2, [])) ? val(2, []) : []);
+      setMachines(Array.isArray(val(3, [])) ? val(3, []) : []);
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     }
@@ -387,7 +396,13 @@ export default function Dashboard() {
   return (
     <div className={pageClass(t)} style={s.page}>
       <style>{PULSE_CSS}</style>
-      <PageHeader title="PRODUCTION DASHBOARD" onRefresh={fetchData} />
+      <PageHeader title="PRODUCTION OEE DASHBOARD" onRefresh={fetchData} extra={(
+        <button type="button" onClick={() => navigate('/dashboard')}
+          style={{ background: 'transparent', border: `1px solid ${t.border}`, color: t.accent,
+                   borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+          ← IMM Monitor
+        </button>
+      )} />
 
       {/* Missing shift alerts */}
       {missingShifts.map(sh => (

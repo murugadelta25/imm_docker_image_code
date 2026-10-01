@@ -149,9 +149,13 @@ export default function PageHeader({ title, onRefresh, extra }) {
     date: { color: t.textDim, fontSize: 10, whiteSpace: 'nowrap' },
   };
 
+  const titleNode = (typeof title === 'string' || typeof title === 'number')
+    ? <h3 style={{ ...s.title, color: t.text }}>{title}</h3>
+    : <div style={{ ...s.title, color: t.text, display: 'flex', alignItems: 'center', minWidth: 0 }}>{title}</div>;
+
   return (
     <div style={{ ...s.bar, borderBottom: `1px solid ${t.border}` }}>
-      <h3 style={{ ...s.title, color: t.text }}>{title}</h3>
+      {titleNode}
       {extra && <div style={s.extra}>{extra}</div>}
       <div style={{ ...s.right, background: t.surface, border: `1px solid ${t.border}` }}>
         <span

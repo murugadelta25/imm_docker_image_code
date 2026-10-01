@@ -3,14 +3,54 @@
   "version": 1,
   "standalone": [
     {
-      "id": "dashboard",
-      "label": "Dashboard",
-      "path": "/dashboard",
+      "id": "oee_dashboard",
+      "label": "OEE Dashboard",
+      "path": "/oee-dashboard",
       "navIcon": "dashboard",
       "alwaysEnabled": true
     }
   ],
   "groups": [
+    {
+      "id": "imm",
+      "label": "IMM Dashboards",
+      "navIcon": "dashboard",
+      "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+      "items": [
+        {
+          "id": "imm.factory",
+          "label": "Factory Dashboard",
+          "path": "/dashboard",
+          "navIcon": "dashboard",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        },
+        {
+          "id": "imm.zone",
+          "label": "Zone Dashboard",
+          "path": "/imm/zone",
+          "navIcon": "dashboard",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        },
+        {
+          "id": "imm.equipment",
+          "label": "Equipment Dashboard",
+          "path": "/imm/equipment",
+          "navIcon": "machines",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        },
+        {
+          "id": "imm.kpis",
+          "label": "IMM KPI's Dashboard",
+          "path": "/imm/kpis",
+          "navIcon": "hourlyOutput",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        }
+      ]
+    },
     {
       "id": "production",
       "label": "Production",
@@ -162,8 +202,8 @@
         },
         {
           "id": "settings.tools",
-          "label": "Tool Management",
-          "path": "/tools",
+          "label": "Mold Management",
+          "path": "/molds",
           "navIcon": "tools",
           "roles": ["admin", "superadmin", "supervisor"]
         },

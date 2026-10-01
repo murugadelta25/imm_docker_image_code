@@ -75,7 +75,7 @@ def build_network_payload() -> dict:
     access_urls = [f"{scheme}://{domain}"]
     for ip in ips:
         access_urls.append(f"{scheme}://{ip}")
-    access_urls_direct = [f"http://{ip}:5174" for ip in ips]
+    access_urls_direct = [f"http://{ip}:5184" for ip in ips]
     return {
         "domain": domain,
         "standard_url": f"{scheme}://{domain}",

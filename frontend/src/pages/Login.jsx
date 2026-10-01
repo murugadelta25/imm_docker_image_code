@@ -4,7 +4,6 @@ import { useAuth } from '../context/AuthContext';
 import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { useBranding } from '../context/BrandingContext';
 import { useTheme } from '../context/ThemeContext';
-import LogoIcon from '../components/graphics/LogoIcon';
 import ThemeModeToggler from '../components/layout/ThemeModeToggler';
 import api from '../api/client';
 import { SESSION_EXPIRED_KEY } from '../components/IdleTimeoutGuard';
@@ -33,7 +32,7 @@ export default function Login() {
   const { modules } = useFeatureFlags();
   const nav = useNavigate();
   const { theme: t } = useTheme();
-  const { siteTitle } = useBranding();
+  const { loginHeroUrl } = useBranding();
 
   useEffect(() => {
     const reason = sessionStorage.getItem(SESSION_EXPIRED_KEY);
@@ -77,7 +76,7 @@ export default function Login() {
       }
     } catch (err) {
       if (err.code === 'ECONNABORTED' || err.message?.includes('timeout') || err.code === 'ERR_NETWORK') {
-        setError('Cannot reach the server. Make sure the backend is running on port 8010.');
+        setError('Cannot reach the server. Make sure the backend is running on port 8040.');
       } else if (err.response?.status === 401) {
         setError('Invalid username or password.');
       } else if (err.response?.status >= 500) {
@@ -141,12 +140,40 @@ export default function Login() {
   return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: t.bg, transition: 'background 0.2s' }}>
       <div style={{ background: t.surface, padding: 40, borderRadius: 12, width: 400, boxShadow: '0 4px 24px #0008', border: `1px solid ${t.border}` }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-          <LogoIcon size={40} />
-          <div>
-            <h2 style={{ color: t.accent, margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: '0.5px' }}>{siteTitle}</h2>
-            <p style={{ color: t.textMuted, margin: 0, fontSize: 13 }}>Production Dashboard</p>
-          </div>
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          textAlign: 'center',
+          marginBottom: 8,
+          gap: 12,
+        }}>
+          <img
+            src={loginHeroUrl || '/din_pms.png'}
+            alt="Production Monitoring System"
+            style={{
+              height: 100,
+              maxWidth: 300,
+              width: '100%',
+              objectFit: 'contain',
+              display: 'block',
+            }}
+            onError={(e) => {
+              if (!e.currentTarget.src.includes('/din_pms.png')) {
+                e.currentTarget.src = '/din_pms.png';
+              }
+            }}
+          />
+          <h2 style={{
+            color: t.accent,
+            margin: 0,
+            fontSize: 18,
+            fontWeight: 700,
+            letterSpacing: '0.3px',
+            lineHeight: 1.35,
+          }}>
+            Production Monitoring System (PMS)
+          </h2>
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 20 }}>
           <ThemeModeToggler />

@@ -298,7 +298,7 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
                   padding: '5px 12px', fontSize: 11, background: '#f59e0b', color: '#fff',
                   border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600,
                 }}>
-                Tool Management
+                Mold Management
               </button>
             </div>
 

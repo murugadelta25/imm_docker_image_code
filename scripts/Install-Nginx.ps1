@@ -2,8 +2,8 @@
 # nginx is installed under %ProgramData%\EAP-PMS\nginx-win (no spaces in path).
 param(
     [string]$ProjectDir = (Split-Path $PSScriptRoot -Parent),
-    [int]$BackendPort = 8010,
-    [int]$FrontendPort = 5174
+    [int]$BackendPort = 8040,
+    [int]$FrontendPort = 5184
 )
 
 $ErrorActionPreference = "Stop"

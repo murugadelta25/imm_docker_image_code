@@ -19,7 +19,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 class MachineCreate(BaseModel):
     name: str
     station_id: int
-    machine_type: Optional[str] = "CNC"
+    machine_type: Optional[str] = "IMM"
     make: Optional[str] = None
     model_no: Optional[str] = None
     tonnage: Optional[str] = None
@@ -253,36 +253,51 @@ def update_reason(log_id: int, data: ReasonUpdate, db: Session = Depends(get_db)
     return {"ok": True, "loss_log_id": loss_id}
 
 
+def _machine_public_dict(m: Machine, station: Optional[Station] = None, live_status: Optional[str] = None) -> dict:
+    """JSON-safe machine payload (avoids ORM/Enum serialization edge cases)."""
+    status = live_status if live_status is not None else (m.status or "idle")
+    if hasattr(status, "value"):
+        status = status.value
+    plc_source = m.plc_source or "manual"
+    if hasattr(plc_source, "value"):
+        plc_source = plc_source.value
+    return {
+        "id": m.id,
+        "name": m.name,
+        "station_id": m.station_id,
+        "station_name": station.display_name if station else "Unknown",
+        "machine_type": m.machine_type,
+        "make": m.make,
+        "model_no": m.model_no,
+        "tonnage": m.tonnage,
+        "features": m.features,
+        "location": m.location,
+        "image_url": m.image_url,
+        "plc_source": plc_source,
+        "plc_endpoint": m.plc_endpoint,
+        "plc_topic": m.plc_topic,
+        "status": status,
+    }
+
+
 @router.get("/")
 def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """List machines with live display status.
+
+    Important: do NOT write status-log / deviation hooks on every GET — Dashboard and
+    other pages poll this endpoint and that side-effect path can exceed client timeouts.
+    """
     from ..operator_presence import get_live_operator_map, operator_fields_for_machine
 
     machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    stations = {s.id: s for s in db.query(Station).all()}
     op_map = get_live_operator_map(db)
     result = []
     for m in machines:
         live_status = _compute_status(m, db)
-        if m.status != live_status:
-            m.status = live_status
-            _log_status(m.id, live_status, "sync", db)
-        station = db.query(Station).filter(Station.id == m.station_id).first()
-        row = {
-            "id": m.id,
-            "name": m.name,
-            "station_id": m.station_id,
-            "station_name": station.display_name if station else "Unknown",
-            "machine_type": m.machine_type,
-            "make": m.make,
-            "model_no": m.model_no,
-            "tonnage": m.tonnage,
-            "features": m.features,
-            "location": m.location,
-            "image_url": m.image_url,
-            "status": live_status,
-        }
+        row = _machine_public_dict(m, stations.get(m.station_id), live_status)
         row.update(operator_fields_for_machine(op_map, m.id))
         result.append(row)
-    db.commit()
     return result
 
 
@@ -299,21 +314,12 @@ def get_fleet(db: Session = Depends(get_db), _=Depends(get_current_user)):
     from ..operator_presence import get_live_operator_map, operator_fields_for_machine
 
     machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    stations = {s.id: s for s in db.query(Station).all()}
     op_map = get_live_operator_map(db)
     result = []
     for m in machines:
         live_status = _compute_status(m, db)
-        station = db.query(Station).filter(Station.id == m.station_id).first()
-        row = {
-            "id": m.id, "name": m.name, "station_id": m.station_id,
-            "station_name": station.display_name if station else "Unknown",
-            "machine_type": m.machine_type, "make": m.make,
-            "model_no": m.model_no, "tonnage": m.tonnage,
-            "features": m.features, "location": m.location,
-            "image_url": m.image_url, "plc_source": m.plc_source,
-            "plc_endpoint": m.plc_endpoint, "plc_topic": m.plc_topic,
-            "status": live_status,
-        }
+        row = _machine_public_dict(m, stations.get(m.station_id), live_status)
         row.update(operator_fields_for_machine(op_map, m.id))
         result.append(row)
     return result
@@ -329,10 +335,17 @@ async def create_machine(data: MachineCreate, db: Session = Depends(get_db),
     
     m = Machine(**data.dict())
     db.add(m)
+    db.flush()
+    try:
+        from ..factory_structure import sync_machine_to_zone
+        sync_machine_to_zone(db, m.station_id, m.location)
+    except Exception as exc:
+        print(f"[WARN] zone station sync skipped: {exc}")
     db.commit()
     db.refresh(m)
     await manager.broadcast({"type": "machine_created", "id": m.id})
-    return m
+    station = db.query(Station).filter(Station.id == m.station_id).first()
+    return _machine_public_dict(m, station)
 
 
 @router.put("/{machine_id}")
@@ -342,19 +355,39 @@ async def update_machine(machine_id: int, data: MachineUpdate,
     m = db.query(Machine).filter(Machine.id == machine_id).first()
     if not m:
         raise HTTPException(404, "Machine not found")
-    
+
+    payload = data.model_dump(exclude_unset=True) if hasattr(data, "model_dump") else data.dict(exclude_unset=True)
+
     # If station_id is being changed, validate it exists
-    if "station_id" in data.dict(exclude_unset=True):
+    if "station_id" in payload:
         station = db.query(Station).filter(Station.id == data.station_id).first()
         if not station:
             raise HTTPException(404, f"Station with id {data.station_id} not found")
-    
-    for k, v in data.dict(exclude_unset=True).items():
+
+    allowed = {
+        "name", "station_id", "machine_type", "make", "model_no", "tonnage",
+        "features", "location", "plc_source", "plc_endpoint", "plc_topic",
+    }
+    for k, v in payload.items():
+        if k not in allowed:
+            continue
+        if k == "plc_source" and v not in (None, "manual", "mqtt", "modbus", "opcua"):
+            raise HTTPException(400, f"plc_source must be one of manual|mqtt|modbus|opcua (got {v!r})")
         setattr(m, k, v)
-    db.commit()
-    db.refresh(m)
+    try:
+        from ..factory_structure import sync_machine_to_zone
+        sync_machine_to_zone(db, m.station_id, m.location)
+    except Exception as exc:
+        print(f"[WARN] zone station sync skipped: {exc}")
+    try:
+        db.commit()
+        db.refresh(m)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, f"Failed to update machine {machine_id}: {exc}") from exc
     await manager.broadcast({"type": "machine_updated", "id": m.id})
-    return m
+    station = db.query(Station).filter(Station.id == m.station_id).first()
+    return _machine_public_dict(m, station)
 
 
 @router.delete("/{machine_id}")
@@ -577,4 +610,12 @@ def get_machine(machine_id: int, db: Session = Depends(get_db), _=Depends(get_cu
     m = db.query(Machine).filter(Machine.id == machine_id).first()
     if not m:
         raise HTTPException(404, "Machine not found")
-    return m
+    try:
+        live_status = _compute_status(m, db)
+        station = db.query(Station).filter(Station.id == m.station_id).first()
+        return _machine_public_dict(m, station, live_status)
+    except Exception as exc:
+        # Fall back to stored fields so a status-compute glitch does not 500 the page
+        print(f"[machines] get_machine({machine_id}) status compute failed: {exc}")
+        station = db.query(Station).filter(Station.id == m.station_id).first()
+        return _machine_public_dict(m, station)

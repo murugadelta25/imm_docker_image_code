@@ -17,7 +17,7 @@ export function resolveNavIcon(key) {
   return ICON_MAP[key] ?? null;
 }
 
-/** All toggleable feature item ids (excludes alwaysEnabled standalone). */
+/** All toggleable feature item ids (excludes alwaysEnabled standalone and group items). */
 export function getAllFeatureItemIds() {
   const ids = [];
   for (const item of FEATURE_REGISTRY.standalone || []) {
@@ -25,7 +25,7 @@ export function getAllFeatureItemIds() {
   }
   for (const group of FEATURE_REGISTRY.groups || []) {
     for (const item of group.items || []) {
-      ids.push(item.id);
+      if (!item.alwaysEnabled) ids.push(item.id);
     }
   }
   return ids;
@@ -35,16 +35,17 @@ export function getDefaultFeatureModules() {
   return Object.fromEntries(getAllFeatureItemIds().map(id => [id, true]));
 }
 
-/** Path → feature item id (longest match). */
+/** Path → feature item id (longest match). alwaysEnabled routes return null (never blocked). */
 export function pathToFeatureId(pathname) {
   const path = pathname.replace(/\/$/, '') || '/';
   for (const item of FEATURE_REGISTRY.standalone || []) {
-    if (item.path === path) {
+    if (item.path === path || path.startsWith(`${item.path}/`)) {
       return item.alwaysEnabled ? null : item.id;
     }
   }
   let best = null;
   let bestLen = -1;
+  let bestAlways = false;
   for (const group of FEATURE_REGISTRY.groups || []) {
     for (const item of group.items || []) {
       const p = item.path;
@@ -52,11 +53,12 @@ export function pathToFeatureId(pathname) {
         if (p.length > bestLen) {
           bestLen = p.length;
           best = item.id;
+          bestAlways = !!item.alwaysEnabled;
         }
       }
     }
   }
-  return best;
+  return bestAlways ? null : best;
 }
 
 export function isFeatureEnabled(featureId, modules) {
@@ -97,7 +99,7 @@ export function buildNavigation(role, modules) {
     if (!canSee(group.roles)) continue;
     const items = (group.items || [])
       .filter(item => canSee(item.roles))
-      .filter(item => itemEnabled(item.id))
+      .filter(item => item.alwaysEnabled || itemEnabled(item.id))
       .map(item => ({
         path: item.path,
         label: item.label,

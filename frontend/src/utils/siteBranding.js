@@ -27,10 +27,10 @@ export function applySiteBranding({ siteTitle, faviconUrl, factories, faviconFac
   }
 
   const link = ensureFaviconLink();
-  if (logo) {
-    link.href = assetUrl(logo);
-    link.type = 'image/png';
-  }
+  // Fall back to built-in DIN PMS logo (not a factory upload).
+  const href = assetUrl(logo) || '/din_pms.png';
+  link.href = href.includes('?') ? `${href}&t=${Date.now()}` : `${href}?t=${Date.now()}`;
+  link.type = 'image/png';
 }
 
 export async function fetchPublicBranding() {

@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
 
 /**
- * WebSocket URL — same host as the page so Vite proxy forwards /ws → backend:8010.
- * Override with VITE_WS_URL (e.g. ws://10.151.47.86:8010) when proxy is unavailable.
+ * WebSocket URL — same host as the page so Vite proxy forwards /ws → backend:8040.
+ * Override with VITE_WS_URL (e.g. ws://10.151.47.86:8040) when proxy is unavailable.
  */
 function getWsUrl() {
   const fromEnv = import.meta.env.VITE_WS_URL;

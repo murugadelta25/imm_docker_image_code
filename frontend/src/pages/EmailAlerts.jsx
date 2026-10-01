@@ -12,7 +12,7 @@ const REPORT_OPTIONS = [
   { key: 'maintenance',  label: 'Maintenance' },
   { key: 'data_entry',   label: 'Data Entry' },
   { key: 'loss_tracker', label: 'LOSS TRACKER' },
-  { key: 'tools',        label: 'Tool Management' },
+  { key: 'tools',        label: 'Mold Management' },
   { key: 'deviation_alerts', label: 'Deviation Alerts (real-time)' },
 ];
 const REPORT_DEFAULTS_BY_NAME = {

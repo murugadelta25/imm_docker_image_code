@@ -1,8 +1,14 @@
 {
-  "clientName": "client_x",
+  "clientName": "YOUR_CUSTOMER_OR_PLANT_NAME",
   "user": "root",
   "password": "YourMySqlPassword",
-  "database": "eap_pms_client_x",
+  "database": "eap_pms_your_customer_or_plant_name",
   "migrate": false,
-  "legacyDatabase": "titan_oee"
+  "legacyDatabase": "titan_oee",
+  "mysql": {
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "YourMySqlPassword"
+  }
 }

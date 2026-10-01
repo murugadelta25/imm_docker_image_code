@@ -15,8 +15,8 @@ APP_SCHEME="${APP_SCHEME:-http}"
 APP_SSL_CERT=""
 APP_SSL_KEY=""
 
-BACKEND_PORT="${BACKEND_PORT:-8010}"
-FRONTEND_PORT="${FRONTEND_PORT:-5174}"
+BACKEND_PORT="${BACKEND_PORT:-8040}"
+FRONTEND_PORT="${FRONTEND_PORT:-5184}"
 BACKEND_LOG="$PROJECT_DIR/backend.log"
 FRONTEND_LOG="$PROJECT_DIR/frontend.log"
 BACKEND_SERVICE=""
@@ -39,8 +39,8 @@ load_deploy_env() {
     # shellcheck disable=SC1090
     set -a; source "$DEPLOY_ENV"; set +a
   fi
-  BACKEND_PORT="${BACKEND_PORT:-8010}"
-  FRONTEND_PORT="${FRONTEND_PORT:-5174}"
+  BACKEND_PORT="${BACKEND_PORT:-8040}"
+  FRONTEND_PORT="${FRONTEND_PORT:-5184}"
   DB_USER="${DB_USER:-root}"
   resolve_service_names
 }
@@ -73,7 +73,7 @@ write_deploy_files() {
   local client_name="$1" db_pass="$2" db_name="$3" db_user="${4:-root}"
 
   python3 - "$DEPLOY_ENV" "$DB_CONFIG" "$client_name" "$db_user" "$db_pass" "$db_name" \
-    "${BACKEND_PORT:-8010}" "${FRONTEND_PORT:-5174}" <<'PY'
+    "${BACKEND_PORT:-8040}" "${FRONTEND_PORT:-5184}" <<'PY'
 import json, shlex, sys
 deploy_path, db_config_path, client, user, password, database, bport, fport = sys.argv[1:9]
 lines = [

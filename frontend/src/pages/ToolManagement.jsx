@@ -183,7 +183,7 @@ export default function ToolManagement() {
     if (!window.confirm('Acknowledge tool correction? (QR scan suppressed for now)')) return;
     try {
       const { data } = await api.post(`/api/tools/${id}/correction`, {
-        notes: 'Correction acknowledged from Tool Management',
+        notes: 'Correction acknowledged from Mold Management',
       });
       setMsg(`✅ ${data.message}`);
       load();
@@ -197,7 +197,7 @@ export default function ToolManagement() {
     if (!window.confirm('Replace tool and reset life cycles? Consumes 1 from stock. (QR suppressed)')) return;
     try {
       const { data } = await api.post(`/api/tools/${id}/replace`, {
-        notes: 'Replaced from Tool Management',
+        notes: 'Replaced from Mold Management',
         consume_stock: true,
       });
       setMsg(`✅ ${data.message}`);
@@ -289,7 +289,7 @@ export default function ToolManagement() {
   return (
     <div className={pageClass(t)} style={{ padding: 20, background: t.bg, minHeight: 'calc(100vh - 52px)', color: t.text }}>
       <PageHeader
-        title="TOOL MANAGEMENT"
+        title="MOLD MANAGEMENT"
         onRefresh={load}
         extra={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -310,7 +310,7 @@ export default function ToolManagement() {
                 </button>
                 <button type="button" onClick={openCreate}
                   style={{ padding: '8px 14px', background: t.accent, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>
-                  + Add Tool
+                  + Add Mold
                 </button>
               </>
             )}
@@ -409,7 +409,7 @@ export default function ToolManagement() {
             <li>At EOL the tool is blocked for planning until <strong>Correction</strong> (temp continue) or <strong>Replace</strong> (reset life, consume 1 stock).</li>
             <li>Planning a WO forecasts stock + life; if short/near EOL the planner must acknowledge to proceed.</li>
             <li><strong>Download Report</strong> exports Excel (inventory / alerts / consumption).</li>
-            <li>Auto schedule: Alerts → Email → group report types → enable <strong>Tool Management</strong>, then add a schedule.</li>
+            <li>Auto schedule: Alerts → Email → group report types → enable <strong>Mold Management</strong>, then add a schedule.</li>
           </ul>
         </div>
       )}

@@ -12,7 +12,7 @@ import ThemeModeToggler from './ThemeModeToggler';
 export default function AppBar({ onMenuClick, isIntegration = false, navVisible = true }) {
   const { user } = useAuth();
   const { theme } = useTheme();
-  const { siteTitle } = useBranding();
+  const { siteTitle, logoUrl } = useBranding();
 
   const menuTitle = isIntegration
     ? navVisible
@@ -80,7 +80,21 @@ export default function AppBar({ onMenuClick, isIntegration = false, navVisible 
           minWidth: 0,
         }}
       >
-        <LogoIcon size={32} />
+        {logoUrl ? (
+          <img
+            src={logoUrl}
+            alt={siteTitle}
+            style={{
+              height: 32,
+              maxWidth: 120,
+              objectFit: 'contain',
+              display: 'block',
+              flexShrink: 0,
+            }}
+          />
+        ) : (
+          <LogoIcon size={32} />
+        )}
         <span
           style={{
             color: theme.accent,

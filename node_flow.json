@@ -1,0 +1,550 @@
+[
+    {
+        "id": "572f6917d02e38da",
+        "type": "tab",
+        "label": "IMM SIE -> EAP API",
+        "disabled": false,
+        "info": "# IMM SIE EDA -> EAP IMM PMS (PUSH)\n\n## Configure\n1. Inject **1 Set EAP webhook URL** (includes throttle)\n2. Inject **2 Set machine fleet map** (Machine Configuration ID + name)\n3. Deploy\n\n## Throttle (stops continuous POST spam)\nDefault: max **1 push / 10 seconds / machine**, and skip unchanged payloads.\n\n```json\n{\n  \"webhook_url\": \"http://192.168.1.116/api/imm/nodered/webhook/push\",\n  \"webhook_secret\": \"\",\n  \"push_min_interval_ms\": 10000,\n  \"push_on_change_only\": true\n}\n```\n\nDo NOT use :5184 for webhook (frontend only).\n",
+        "env": []
+    },
+    {
+        "id": "28778a3f76848bc9",
+        "type": "broker-config",
+        "name": "SIE",
+        "host": "rabbitmq.eda",
+        "port": "5672",
+        "vhost": "",
+        "tls": false,
+        "credsFromSettings": false
+    },
+    {
+        "id": "nr_inject_eap_config",
+        "type": "inject",
+        "z": "572f6917d02e38da",
+        "name": "1 Set EAP webhook URL",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "eap_config",
+        "payload": "{\"webhook_url\":\"http://192.168.1.116/api/imm/nodered/webhook/push\",\"webhook_secret\":\"\",\"push_min_interval_ms\":10000,\"push_on_change_only\":true}",
+        "payloadType": "json",
+        "x": 200,
+        "y": 420,
+        "wires": [
+            [
+                "nr_fn_save_eap_config"
+            ]
+        ]
+    },
+    {
+        "id": "nr_inject_eap_apply",
+        "type": "inject",
+        "z": "572f6917d02e38da",
+        "name": "Re-apply EAP URL (manual)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "eap_config",
+        "payload": "{\"webhook_url\":\"http://192.168.1.116/api/imm/nodered/webhook/push\",\"webhook_secret\":\"\",\"push_min_interval_ms\":10000,\"push_on_change_only\":true}",
+        "payloadType": "json",
+        "x": 200,
+        "y": 480,
+        "wires": [
+            [
+                "nr_fn_save_eap_config"
+            ]
+        ]
+    },
+    {
+        "id": "nr_fn_save_eap_config",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Save EAP config -> global",
+        "func": "const cfg = msg.payload || {};\n\nif (cfg.webhook_url) {\n  const url = String(cfg.webhook_url).trim().replace(/\\/+$/, '');\n  global.set('EAP_WEBHOOK_URL', url);\n}\nif (cfg.webhook_secret !== undefined) {\n  global.set('EAP_WEBHOOK_SECRET', String(cfg.webhook_secret || ''));\n}\nif (cfg.eap_host) global.set('EAP_HOST', String(cfg.eap_host).trim());\nif (cfg.eap_port) global.set('EAP_PORT', String(cfg.eap_port).trim());\nif (cfg.use_port80 === true) {\n  const host = cfg.eap_host || global.get('EAP_HOST') || '192.168.1.116';\n  global.set('EAP_WEBHOOK_URL', `http://${host}/api/imm/nodered/webhook/push`);\n}\n\nconst interval = Number(cfg.push_min_interval_ms);\nglobal.set('EAP_PUSH_MIN_INTERVAL_MS', Number.isFinite(interval) && interval >= 0 ? interval : 10000);\nglobal.set('EAP_PUSH_ON_CHANGE_ONLY', cfg.push_on_change_only !== false);\n\nconst active = global.get('EAP_WEBHOOK_URL') || '(host/port fallback)';\nconst thr = global.get('EAP_PUSH_MIN_INTERVAL_MS') + 'ms change=' + global.get('EAP_PUSH_ON_CHANGE_ONLY');\nnode.status({ fill: 'blue', shape: 'ring', text: active + ' | ' + thr });\nnode.warn('EAP webhook URL set: ' + active + ' throttle=' + thr);\nreturn null;",
+        "outputs": 0,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 450,
+        "wires": []
+    },
+    {
+        "id": "nr_inject_fleet_map",
+        "type": "inject",
+        "z": "572f6917d02e38da",
+        "name": "2 Set machine fleet map",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "eap_fleet_map",
+        "payload": "{\"IMM_07\":{\"machine_id\":1,\"machine_name\":\"IMM_07\"},\"IMM_08\":{\"machine_id\":2,\"machine_name\":\"IMM_08\"},\"IMM_09\":{\"machine_id\":3,\"machine_name\":\"IMM_09\"},\"IMM_10\":{\"machine_id\":4,\"machine_name\":\"IMM_10\"}}",
+        "payloadType": "json",
+        "x": 200,
+        "y": 540,
+        "wires": [
+            [
+                "nr_fn_save_fleet_map"
+            ]
+        ]
+    },
+    {
+        "id": "nr_inject_fleet_apply",
+        "type": "inject",
+        "z": "572f6917d02e38da",
+        "name": "Re-apply fleet map (manual)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "eap_fleet_map",
+        "payload": "{\"IMM_07\":{\"machine_id\":1,\"machine_name\":\"IMM_07\"},\"IMM_08\":{\"machine_id\":2,\"machine_name\":\"IMM_08\"},\"IMM_09\":{\"machine_id\":3,\"machine_name\":\"IMM_09\"},\"IMM_10\":{\"machine_id\":4,\"machine_name\":\"IMM_10\"}}",
+        "payloadType": "json",
+        "x": 200,
+        "y": 600,
+        "wires": [
+            [
+                "nr_fn_save_fleet_map"
+            ]
+        ]
+    },
+    {
+        "id": "nr_fn_save_fleet_map",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Save fleet map -> global",
+        "func": "const raw = msg.payload || {};\nconst map = {};\nObject.keys(raw).forEach((k) => {\n  const row = raw[k] || {};\n  const mid = Number(row.machine_id);\n  if (!Number.isFinite(mid) || mid <= 0) return;\n  map[String(k).trim().toUpperCase()] = {\n    machine_id: mid,\n    machine_name: String(row.machine_name || k).trim()\n  };\n});\nglobal.set('EAP_MACHINE_FLEET', map);\nconst summary = Object.keys(map).map((k) => k + '->' + map[k].machine_id).join(', ');\nnode.status({ fill: 'blue', shape: 'dot', text: summary || 'empty map' });\nnode.warn('EAP machine fleet map: ' + (summary || '(empty)'));\nreturn null;",
+        "outputs": 0,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 500,
+        "y": 570,
+        "wires": []
+    },
+    {
+        "id": "nr_fn_normalize",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Normalize & store IMM trx",
+        "func": "const DEVICE_LABELS = {\n  'b695f76c-457a-4742-89d3-8950cc1f38a2': 'IMM_07',\n  '39ee125e-fa64-45c2-a92d-7dcf3990896f': 'IMM_08',\n  '7c0cee0d-1466-49da-830f-bb0447870286': 'IMM_09',\n  '7e9ab0d8-70bf-423a-be18-d4829c8dcdc5': 'IMM_10'\n};\n\nconst DEFAULT_FLEET = {\n  IMM_07: { machine_id: 1, machine_name: 'IMM_07' },\n  IMM_08: { machine_id: 2, machine_name: 'IMM_08' },\n  IMM_09: { machine_id: 3, machine_name: 'IMM_09' },\n  IMM_10: { machine_id: 4, machine_name: 'IMM_10' }\n};\n\nconst p = msg.payload || {};\nlet body = {};\nif (p.body && typeof p.body === 'object' && !Array.isArray(p.body)) {\n  body = p.body;\n} else if (p.trx && p.trx.body && typeof p.trx.body === 'object') {\n  body = p.trx.body;\n} else if (typeof p === 'object' && p.Actual_Cycle_Time !== undefined) {\n  body = p;\n}\n\nconst deviceId = String(p.device || msg.device || '').trim();\nif (!deviceId) {\n  node.warn('IMM trx missing device UUID');\n  return null;\n}\n\nconst label = DEVICE_LABELS[deviceId] || String(p.device_name || '').trim() || deviceId;\nconst fleet = global.get('EAP_MACHINE_FLEET') || DEFAULT_FLEET;\nconst mapped = fleet[String(label).toUpperCase()] || fleet[label] || null;\n\nif (!mapped || !mapped.machine_id) {\n  node.warn('No EAP fleet map for ' + label + ' - edit inject \"2 Set machine fleet map\"');\n  node.status({ fill: 'red', shape: 'ring', text: 'unmapped ' + label });\n  return null;\n}\n\nconst parameters = {};\nObject.keys(body).forEach((k) => {\n  const v = body[k];\n  if (v !== null && v !== undefined && v !== '') {\n    parameters[k] = String(v);\n  }\n});\n\nconst entry = {\n  machine_id: Number(mapped.machine_id),\n  machine_name: String(mapped.machine_name || label),\n  device_id: deviceId,\n  device_name: label,\n  trx_name: (p.trx && p.trx.name) || p.name || '',\n  message_id: p.id || null,\n  received_at: new Date().toISOString(),\n  parameter_count: Object.keys(parameters).length,\n  parameters\n};\n\nconst store = global.get('immLiveByDevice') || {};\nstore[deviceId] = entry;\nglobal.set('immLiveByDevice', store);\n\nnode.status({\n  fill: 'green',\n  shape: 'dot',\n  text: entry.machine_name + ' -> fleet #' + entry.machine_id + ' (' + entry.parameter_count + 'p)'\n});\n\nmsg.payload = entry;\nmsg.device_id = deviceId;\nmsg.machine_id = entry.machine_id;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 450,
+        "y": 280,
+        "wires": [
+            [
+                "nr_dbg_store",
+                "nr_status_fn",
+                "nr_fn_throttle_push"
+            ]
+        ]
+    },
+    {
+        "id": "nr_fn_throttle_push",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Throttle EAP push",
+        "func": "// Gate HTTP to EAP (CNC-style). Live store still updates every SIE msg.\nconst entry = msg.payload || {};\nconst deviceId = String(entry.device_id || msg.device_id || '').trim();\nif (!deviceId) return null;\n\nconst minMs = Number(global.get('EAP_PUSH_MIN_INTERVAL_MS'));\nconst interval = Number.isFinite(minMs) && minMs >= 0 ? minMs : 10000;\nconst changeOnly = global.get('EAP_PUSH_ON_CHANGE_ONLY') !== false;\n\nconst params = entry.parameters || {};\nconst sig = JSON.stringify(params);\nconst now = Date.now();\n\nconst lastSig = global.get('immPushSigByDevice') || {};\nconst lastAt = global.get('immPushAtByDevice') || {};\nconst prevSig = lastSig[deviceId];\nconst prevAt = Number(lastAt[deviceId] || 0);\nconst changed = prevSig !== sig;\nconst due = (now - prevAt) >= interval;\n\nif (!due) {\n  node.status({\n    fill: 'yellow',\n    shape: 'ring',\n    text: 'throttle ' + Math.ceil((interval - (now - prevAt)) / 1000) + 's #' + (entry.machine_id || '')\n  });\n  return null;\n}\n\nif (changeOnly && !changed) {\n  lastAt[deviceId] = now;\n  global.set('immPushAtByDevice', lastAt);\n  node.status({ fill: 'yellow', shape: 'ring', text: 'skip unchanged #' + (entry.machine_id || '') });\n  return null;\n}\n\nlastSig[deviceId] = sig;\nlastAt[deviceId] = now;\nglobal.set('immPushSigByDevice', lastSig);\nglobal.set('immPushAtByDevice', lastAt);\n\nnode.status({\n  fill: 'green',\n  shape: 'dot',\n  text: 'push ' + (entry.machine_name || '') + ' #' + (entry.machine_id || '') + (changed ? ' change' : '')\n});\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 700,
+        "y": 280,
+        "wires": [
+            [
+                "nr_fn_push_prepare"
+            ]
+        ]
+    },
+    {
+        "id": "nr_fn_push_prepare",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Prepare EAP push",
+        "func": "const WEBHOOK_URL = global.get('EAP_WEBHOOK_URL');\nconst WEBHOOK_SECRET = global.get('EAP_WEBHOOK_SECRET') || '';\n\nlet url = WEBHOOK_URL;\nif (!url) {\n  const host = global.get('EAP_HOST') || '192.168.1.116';\n  const port = global.get('EAP_PORT') || '8040';\n  url = `http://${host}:${port}/api/imm/nodered/webhook/push`;\n}\n\nmsg.method = 'POST';\nmsg.url = url;\nmsg.headers = { 'Content-Type': 'application/json' };\nif (WEBHOOK_SECRET) {\n  msg.headers['X-Webhook-Secret'] = WEBHOOK_SECRET;\n}\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 920,
+        "y": 280,
+        "wires": [
+            [
+                "nr_http_push_eap"
+            ]
+        ]
+    },
+    {
+        "id": "nr_http_push_eap",
+        "type": "http request",
+        "z": "572f6917d02e38da",
+        "name": "POST -> EAP webhook",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 1140,
+        "y": 280,
+        "wires": [
+            [
+                "nr_dbg_push",
+                "nr_fn_push_status"
+            ]
+        ]
+    },
+    {
+        "id": "nr_fn_push_status",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Push status",
+        "func": "const code = msg.statusCode || 0;\nconst ok = code >= 200 && code < 300;\nnode.status({\n  fill: ok ? 'green' : 'red',\n  shape: 'dot',\n  text: (ok ? 'EAP OK ' : 'EAP ERR ') + code\n});\nif (!ok) {\n  node.warn('EAP push failed ' + code + ' url=' + (global.get('EAP_WEBHOOK_URL') || ''));\n}\nreturn null;",
+        "outputs": 0,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1360,
+        "y": 320,
+        "wires": []
+    },
+    {
+        "id": "nr_dbg_push",
+        "type": "debug",
+        "z": "572f6917d02e38da",
+        "name": "EAP push response (debug)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1360,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "nr_dbg_store",
+        "type": "debug",
+        "z": "572f6917d02e38da",
+        "name": "stored (enable to debug)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 710,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "nr_status_fn",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Update flow status",
+        "func": "const store = global.get('immLiveByDevice') || {};\nconst n = Object.keys(store).length;\nconst ids = Object.values(store).map((d) => (d.machine_name || '?') + '#' + (d.machine_id || '?')).join(', ');\nnode.status({ fill: 'green', shape: 'dot', text: n + ' live: ' + ids });\nreturn null;",
+        "outputs": 0,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 710,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "nr_http_health",
+        "type": "http in",
+        "z": "572f6917d02e38da",
+        "name": "GET /imm/api/health",
+        "url": "/imm/api/health",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 180,
+        "y": 700,
+        "wires": [
+            [
+                "nr_fn_health"
+            ]
+        ]
+    },
+    {
+        "id": "nr_fn_health",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Health check",
+        "func": "const store = global.get('immLiveByDevice') || {};\nmsg.payload = {\n  ok: true,\n  service: 'imm-nodered-api',\n  eap_webhook_url: global.get('EAP_WEBHOOK_URL') || null,\n  eap_machine_fleet: global.get('EAP_MACHINE_FLEET') || null,\n  push_min_interval_ms: global.get('EAP_PUSH_MIN_INTERVAL_MS'),\n  device_count: Object.keys(store).length,\n  devices: Object.values(store).map(d => ({\n    machine_id: d.machine_id,\n    machine_name: d.machine_name,\n    device_id: d.device_id,\n    device_name: d.device_name,\n    received_at: d.received_at,\n    parameter_count: d.parameter_count\n  })),\n  updated_at: new Date().toISOString()\n};\nmsg.statusCode = 200;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 700,
+        "wires": [
+            [
+                "nr_http_res"
+            ]
+        ]
+    },
+    {
+        "id": "nr_http_all",
+        "type": "http in",
+        "z": "572f6917d02e38da",
+        "name": "GET /imm/api/live",
+        "url": "/imm/api/live",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 170,
+        "y": 760,
+        "wires": [
+            [
+                "nr_fn_http_all"
+            ]
+        ]
+    },
+    {
+        "id": "nr_fn_http_all",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Build live list",
+        "func": "const store = global.get('immLiveByDevice') || {};\nmsg.payload = {\n  ok: true,\n  count: Object.keys(store).length,\n  devices: Object.values(store),\n  updated_at: new Date().toISOString()\n};\nmsg.statusCode = 200;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 760,
+        "wires": [
+            [
+                "nr_http_res"
+            ]
+        ]
+    },
+    {
+        "id": "nr_http_one",
+        "type": "http in",
+        "z": "572f6917d02e38da",
+        "name": "GET /imm/api/live/:id",
+        "url": "/imm/api/live/:deviceId",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 190,
+        "y": 820,
+        "wires": [
+            [
+                "nr_fn_http_one"
+            ]
+        ]
+    },
+    {
+        "id": "nr_fn_http_one",
+        "type": "function",
+        "z": "572f6917d02e38da",
+        "name": "Build one device",
+        "func": "const id = msg.req.params.deviceId;\nconst store = global.get('immLiveByDevice') || {};\nconst entry = store[id];\nif (!entry) {\n  msg.payload = { ok: false, error: 'not found', device_id: id };\n  msg.statusCode = 404;\n} else {\n  msg.payload = { ok: true, device: entry };\n  msg.statusCode = 200;\n}\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 410,
+        "y": 820,
+        "wires": [
+            [
+                "nr_http_res"
+            ]
+        ]
+    },
+    {
+        "id": "nr_http_res",
+        "type": "http response",
+        "z": "572f6917d02e38da",
+        "name": "JSON response",
+        "statusCode": "",
+        "headers": {
+            "content-type": "application/json",
+            "access-control-allow-origin": "*"
+        },
+        "x": 660,
+        "y": 760,
+        "wires": []
+    },
+    {
+        "id": "18f1b08204637a7f",
+        "type": "sie-device-data",
+        "z": "572f6917d02e38da",
+        "name": "IMM_07",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.b695f76c-457a-4742-89d3-8950cc1f38a2.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "b695f76c-457a-4742-89d3-8950cc1f38a2",
+        "x": 170,
+        "y": 140,
+        "wires": [
+            [
+                "nr_fn_normalize"
+            ]
+        ]
+    },
+    {
+        "id": "7e930624f3b62a21",
+        "type": "sie-device-data",
+        "z": "572f6917d02e38da",
+        "name": "IMM_08",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.39ee125e-fa64-45c2-a92d-7dcf3990896f.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "39ee125e-fa64-45c2-a92d-7dcf3990896f",
+        "x": 170,
+        "y": 200,
+        "wires": [
+            [
+                "nr_fn_normalize"
+            ]
+        ]
+    },
+    {
+        "id": "254e96d5aa84f532",
+        "type": "sie-device-data",
+        "z": "572f6917d02e38da",
+        "name": "IMM_09",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.7c0cee0d-1466-49da-830f-bb0447870286.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "7c0cee0d-1466-49da-830f-bb0447870286",
+        "x": 170,
+        "y": 260,
+        "wires": [
+            [
+                "nr_fn_normalize"
+            ]
+        ]
+    },
+    {
+        "id": "8410d92f3b797d4d",
+        "type": "sie-device-data",
+        "z": "572f6917d02e38da",
+        "name": "IMM_10",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.7e9ab0d8-70bf-423a-be18-d4829c8dcdc5.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "7e9ab0d8-70bf-423a-be18-d4829c8dcdc5",
+        "x": 170,
+        "y": 320,
+        "wires": [
+            [
+                "nr_fn_normalize"
+            ]
+        ]
+    }
+]

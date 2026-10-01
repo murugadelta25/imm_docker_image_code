@@ -128,7 +128,7 @@ class Machine(Base):
     name = Column(String(100), nullable=False)
     station_id = Column(Integer, ForeignKey("stations.id"), nullable=False)
     status = Column(Enum("running", "idle", "breakdown", "setting_change", "alarm", "offline"), default="idle")
-    machine_type = Column(String(50), default="CNC")
+    machine_type = Column(String(50), default="IMM")
     make = Column(String(100))
     model_no = Column(String(100))
     tonnage = Column(String(50))
@@ -289,6 +289,70 @@ class SiteConfig(Base):
     __tablename__ = "site_config"
     id = Column(Integer, primary_key=True, index=True)
     config_json = Column(Text, nullable=False)
+
+
+class Factory(Base):
+    """Plant / factory master — source of truth for IMM Factory Setup."""
+    __tablename__ = "factories"
+    id = Column(Integer, primary_key=True, index=True)
+    external_key = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    logo_url = Column(String(500))
+    address = Column(String(500))
+    lat = Column(String(50))
+    lng = Column(String(50))
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now_ist)
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+    departments = relationship(
+        "FactoryDepartment",
+        back_populates="factory",
+        cascade="all, delete-orphan",
+        order_by="FactoryDepartment.sort_order",
+    )
+
+
+class FactoryDepartment(Base):
+    __tablename__ = "factory_departments"
+    id = Column(Integer, primary_key=True, index=True)
+    factory_id = Column(Integer, ForeignKey("factories.id", ondelete="CASCADE"), nullable=False, index=True)
+    external_key = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(150), nullable=False, default="")
+    sort_order = Column(Integer, default=0)
+    factory = relationship("Factory", back_populates="departments")
+    zones = relationship(
+        "FactoryZone",
+        back_populates="department",
+        cascade="all, delete-orphan",
+        order_by="FactoryZone.sort_order",
+    )
+
+
+class FactoryZone(Base):
+    """IMM Zone (UI) — formerly Factory Setup 'line'."""
+    __tablename__ = "factory_zones"
+    id = Column(Integer, primary_key=True, index=True)
+    department_id = Column(
+        Integer, ForeignKey("factory_departments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    external_key = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(150), nullable=False, default="")
+    sort_order = Column(Integer, default=0)
+    department = relationship("FactoryDepartment", back_populates="zones")
+    stations = relationship(
+        "FactoryZoneStation",
+        back_populates="zone",
+        cascade="all, delete-orphan",
+    )
+
+
+class FactoryZoneStation(Base):
+    """Stations assigned to a factory zone."""
+    __tablename__ = "factory_zone_stations"
+    zone_id = Column(Integer, ForeignKey("factory_zones.id", ondelete="CASCADE"), primary_key=True)
+    station_id = Column(Integer, ForeignKey("stations.id", ondelete="CASCADE"), primary_key=True)
+    zone = relationship("FactoryZone", back_populates="stations")
+
 
 class MachineStatusLog(Base):
     __tablename__ = "machine_status_log"
@@ -835,3 +899,173 @@ def ensure_mobile_schema(bind=None):
 
 
 ensure_mobile_schema()
+
+
+# ── IMM (Injection Molding) monitoring ──────────────────────────────────────
+
+class ImmMold(Base):
+    """Mold life / maintenance tracking per IMM machine."""
+    __tablename__ = "imm_molds"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    mold_no = Column(String(100), nullable=False)
+    usage_count = Column(Integer, default=0)
+    usage_max = Column(Integer, default=1000000)
+    cycles_after_maintenance = Column(Integer, default=0)
+    maintenance_limit = Column(Integer, default=25000)
+    is_active = Column(Integer, default=1)  # 1 = currently mounted
+    notes = Column(String(255))
+    created_at = Column(DateTime, default=now_ist)
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+class ImmKeyComponent(Base):
+    """Key IMM wear parts: barrel, screw, tip, nozzle."""
+    __tablename__ = "imm_key_components"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    component_type = Column(String(40), nullable=False)  # barrel|screwRod|screwTip|nozzle
+    spec_length = Column(String(40))
+    spec_diameter = Column(String(40))
+    start_date = Column(Date)
+    expect_days = Column(Integer, default=365)
+    description = Column(String(255))
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=now_ist)
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+class ImmKpivThreshold(Base):
+    """SPC / fixed-tolerance thresholds for KPIV charts."""
+    __tablename__ = "imm_kpiv_thresholds"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    tag = Column(String(40), nullable=False)  # injection_end|max_pressure|nozzle_temp|barrel_temp|charge_time
+    center = Column(Float)
+    sigma = Column(Float, default=3.0)
+    upper = Column(Float)
+    lower = Column(Float)
+    sample_points = Column(Integer, default=20)
+    mode = Column(String(20), default="sigma")  # sigma | fixed
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+class ImmKpivSample(Base):
+    """Historical KPIV samples (PLC ingest or simulated)."""
+    __tablename__ = "imm_kpiv_samples"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    tag = Column(String(40), nullable=False, index=True)
+    value = Column(Float, nullable=False)
+    recorded_at = Column(DateTime, default=now_ist, index=True)
+
+
+class ImmOpcuaParamDef(Base):
+    """Catalog of Dia Edge / Yizumi IMM OPC UA parameters (global)."""
+    __tablename__ = "imm_opcua_param_defs"
+    id = Column(Integer, primary_key=True, index=True)
+    param_key = Column(String(120), unique=True, nullable=False, index=True)
+    display_name = Column(String(160), nullable=False)
+    io_type = Column(String(40), default="STRING")
+    category = Column(String(40), default="general")
+    identified_tag = Column(String(120))
+    identified_node_id = Column(String(80))
+    kpiv_tag = Column(String(40))
+    sort_order = Column(Integer, default=0)
+    is_active = Column(Integer, default=1)
+
+
+class ImmOpcuaTagMap(Base):
+    """Per-machine OPC UA tag / NodeId mapping for each catalog parameter."""
+    __tablename__ = "imm_opcua_tag_maps"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    param_key = Column(String(120), nullable=False, index=True)
+    opcua_tag_name = Column(String(160))
+    opcua_node_id = Column(String(160))
+    enabled = Column(Integer, default=1)
+    scale = Column(Float, default=1.0)
+    offset = Column(Float, default=0.0)
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+class ImmOpcuaLatest(Base):
+    """Latest live value snapshot per machine + parameter."""
+    __tablename__ = "imm_opcua_latest"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    param_key = Column(String(120), nullable=False, index=True)
+    value_num = Column(Float)
+    value_text = Column(String(255))
+    quality = Column(String(40), default="good")
+    source = Column(String(40), default="opcua")  # opcua | bridge | simulate
+    recorded_at = Column(DateTime, default=now_ist, index=True)
+
+
+class ImmOpcuaSample(Base):
+    """Historical OPC UA / bridge parameter samples."""
+    __tablename__ = "imm_opcua_samples"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    param_key = Column(String(120), nullable=False, index=True)
+    value_num = Column(Float)
+    value_text = Column(String(255))
+    quality = Column(String(40), default="good")
+    source = Column(String(40), default="opcua")
+    recorded_at = Column(DateTime, default=now_ist, index=True)
+
+
+def ensure_imm_schema(bind=None):
+    """Create IMM monitoring + OPC UA tables if missing."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import inspect
+        inspector = inspect(bind)
+        tables = {
+            "imm_molds": ImmMold.__table__,
+            "imm_key_components": ImmKeyComponent.__table__,
+            "imm_kpiv_thresholds": ImmKpivThreshold.__table__,
+            "imm_kpiv_samples": ImmKpivSample.__table__,
+            "imm_opcua_param_defs": ImmOpcuaParamDef.__table__,
+            "imm_opcua_tag_maps": ImmOpcuaTagMap.__table__,
+            "imm_opcua_latest": ImmOpcuaLatest.__table__,
+            "imm_opcua_samples": ImmOpcuaSample.__table__,
+        }
+        for name, table in tables.items():
+            if not inspector.has_table(name):
+                table.create(bind=bind)
+                print(f"[OK] Created table {name}")
+        return True
+    except Exception as exc:
+        print(f"[WARN] ensure_imm_schema failed: {exc}")
+        return False
+
+
+ensure_imm_schema()
+
+
+def ensure_factory_schema(bind=None):
+    """Create factories / departments / zones relational tables if missing."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import inspect
+        inspector = inspect(bind)
+        tables = {
+            "factories": Factory.__table__,
+            "factory_departments": FactoryDepartment.__table__,
+            "factory_zones": FactoryZone.__table__,
+            "factory_zone_stations": FactoryZoneStation.__table__,
+        }
+        for name, table in tables.items():
+            if not inspector.has_table(name):
+                table.create(bind=bind)
+                print(f"[OK] Created table {name}")
+        return True
+    except Exception as exc:
+        print(f"[WARN] ensure_factory_schema failed: {exc}")
+        return False
+
+
+ensure_factory_schema()

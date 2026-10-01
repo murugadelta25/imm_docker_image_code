@@ -1,17 +1,27 @@
 import json
 import os
-from fastapi import APIRouter, Depends, UploadFile, File
+from typing import Optional
+from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from pathlib import Path
-import shutil, uuid
+import uuid
 from ..models import SiteConfig, get_db
 from ..auth import get_current_user, require_role
 from ..network_utils import build_network_payload
+from ..factory_structure import (
+    attach_factories_to_config,
+    replace_factories_tree,
+    sync_factory_branding_json,
+    update_factory_logo,
+)
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
-FACTORY_DIR = Path(__file__).parent.parent.parent / "static" / "factory"
+# Same root as app.main STATIC_DIR mount → /static/...
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+STATIC_DIR = _BACKEND_ROOT / "static"
+FACTORY_DIR = STATIC_DIR / "factory"
 FACTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SITE_TITLE = os.getenv("SITE_TITLE", "Production Monitoring System (PMS)")
@@ -68,6 +78,9 @@ DEFAULT_CONFIG = {
         "siteTitle": DEFAULT_SITE_TITLE,
         "faviconFactoryId": None,
         "factories": [],
+        # Login screen hero image (separate from factory logo / favicon)
+        "loginImageEnabled": False,
+        "loginImageUrl": None,
     },
     "backup": {
         "enabled": False,
@@ -85,6 +98,40 @@ class ConfigPayload(BaseModel):
     config: dict
 
 
+def _normalize_factory_cfg(factory: dict) -> dict:
+    """Drop nameless logo-upload stubs and keep branding fields consistent."""
+    out = dict(factory or {})
+    factories = []
+    for item in out.get("factories") or []:
+        if not isinstance(item, dict):
+            continue
+        if not str(item.get("name") or "").strip():
+            # Preserve logo for later merge if a real factory reuses this id.
+            logo = item.get("logoUrl")
+            fid = item.get("id")
+            if fid and logo:
+                draft = dict(out.get("draftLogos") or {})
+                draft[str(fid)] = logo
+                out["draftLogos"] = draft
+                if not out.get("brandingLogoUrl"):
+                    out["brandingLogoUrl"] = logo
+            continue
+        factories.append(item)
+    out["factories"] = factories
+    fav = out.get("faviconFactoryId")
+    if fav and not any(str(f.get("id")) == str(fav) for f in factories):
+        # Keep brandingLogoUrl as the active header/favicon source.
+        if not out.get("brandingLogoUrl"):
+            for f in factories:
+                if f.get("logoUrl"):
+                    out["brandingLogoUrl"] = f["logoUrl"]
+                    out["faviconFactoryId"] = f.get("id")
+                    break
+            else:
+                out["faviconFactoryId"] = None
+    return out
+
+
 def merge_config(stored: dict) -> dict:
     """Merge stored site config with defaults (timed breaks required for hourly output)."""
     if not stored:
@@ -100,7 +147,7 @@ def merge_config(stored: dict) -> dict:
         breaks_out[sid] = {**base, **(stored.get("breaks") or {}).get(sid, {})}
     merged["breaks"] = breaks_out
     factory = stored.get("factory") or {}
-    merged["factory"] = {**DEFAULT_CONFIG["factory"], **factory}
+    merged["factory"] = _normalize_factory_cfg({**DEFAULT_CONFIG["factory"], **factory})
     esc = stored.get("deviation_escalation") or {}
     default_esc = DEFAULT_CONFIG["deviation_escalation"]
     merged["deviation_escalation"] = {
@@ -126,19 +173,45 @@ def _load_config(db: Session) -> dict:
     row = db.query(SiteConfig).first()
     if not row:
         return dict(DEFAULT_CONFIG)
-    cfg = merge_config(json.loads(row.config_json))
+    try:
+        raw = json.loads(row.config_json) if row.config_json else {}
+    except Exception:
+        raw = {}
+    cfg = merge_config(raw)
     factory = cfg.get("factory") or {}
     if "siteTitle" not in factory:
         factory["siteTitle"] = DEFAULT_CONFIG["factory"]["siteTitle"]
     if "faviconFactoryId" not in factory:
         factory["faviconFactoryId"] = None
+    if "loginImageEnabled" not in factory:
+        factory["loginImageEnabled"] = bool(DEFAULT_CONFIG["factory"].get("loginImageEnabled"))
+    if "loginImageUrl" not in factory:
+        factory["loginImageUrl"] = None
     cfg["factory"] = factory
+
+    # Heal DB: logo-upload used to insert nameless factory stubs — drop them once.
+    raw_factory = raw.get("factory") if isinstance(raw, dict) else None
+    raw_list = (raw_factory or {}).get("factories") if isinstance(raw_factory, dict) else None
+    if isinstance(raw_list, list) and any(
+        isinstance(f, dict) and not str(f.get("name") or "").strip() for f in raw_list
+    ):
+        healed = dict(raw)
+        healed["factory"] = factory
+        row.config_json = json.dumps(healed)
+        db.commit()
+
+    # Relational factories / departments / zones are the source of truth
+    cfg = attach_factories_to_config(db, cfg)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
     return cfg
 
 
 @router.get("/branding")
 def get_branding(db: Session = Depends(get_db)):
-    """Public site title + favicon for browser tab (no auth required)."""
+    """Public site title + favicon + login image (no auth required)."""
     cfg = _load_config(db)
     factory_cfg = cfg.get("factory") or {}
     site_title = factory_cfg.get("siteTitle") or DEFAULT_SITE_TITLE
@@ -148,12 +221,29 @@ def get_branding(db: Session = Depends(get_db)):
         if favicon_id and f.get("id") == favicon_id and f.get("logoUrl"):
             favicon_url = f["logoUrl"]
             break
+    if not favicon_url and favicon_id:
+        draft = (factory_cfg.get("draftLogos") or {}).get(str(favicon_id))
+        if draft:
+            favicon_url = draft
     if not favicon_url:
         for f in factory_cfg.get("factories") or []:
             if f.get("logoUrl"):
                 favicon_url = f["logoUrl"]
                 break
-    return {"siteTitle": site_title, "faviconUrl": favicon_url}
+    if not favicon_url:
+        favicon_url = factory_cfg.get("brandingLogoUrl") or None
+
+    login_enabled = bool(factory_cfg.get("loginImageEnabled"))
+    login_url = factory_cfg.get("loginImageUrl") or None
+    if login_enabled and not login_url:
+        login_enabled = False
+
+    return {
+        "siteTitle": site_title,
+        "faviconUrl": favicon_url,
+        "loginImageEnabled": login_enabled,
+        "loginImageUrl": login_url if login_enabled else None,
+    }
 
 
 @router.get("/network")
@@ -228,19 +318,177 @@ def save_config(payload: ConfigPayload, db: Session = Depends(get_db), _=Depends
             **incoming["mobile_integration"],
         }
 
+    if isinstance(incoming.get("factory"), dict):
+        # Merge draft logos from upload onto named factories, then prune stubs.
+        factory_in = dict(incoming["factory"])
+        existing_factory = dict(existing.get("factory") or {})
+        draft = dict(existing_factory.get("draftLogos") or {})
+        draft.update(factory_in.get("draftLogos") or {})
+        factories = []
+        for item in factory_in.get("factories") or []:
+            if not isinstance(item, dict):
+                continue
+            row_f = dict(item)
+            fid = str(row_f.get("id") or "")
+            if fid and not row_f.get("logoUrl") and draft.get(fid):
+                row_f["logoUrl"] = draft[fid]
+            if fid and row_f.get("logoUrl"):
+                draft.pop(fid, None)
+            factories.append(row_f)
+        factory_in["factories"] = factories
+        factory_in["draftLogos"] = draft
+        if factory_in.get("brandingLogoUrl") is None and existing_factory.get("brandingLogoUrl"):
+            factory_in["brandingLogoUrl"] = existing_factory.get("brandingLogoUrl")
+        # Keep login hero settings unless the client explicitly sends them
+        if "loginImageUrl" not in factory_in and existing_factory.get("loginImageUrl"):
+            factory_in["loginImageUrl"] = existing_factory.get("loginImageUrl")
+        if "loginImageEnabled" not in factory_in and "loginImageEnabled" in existing_factory:
+            factory_in["loginImageEnabled"] = existing_factory.get("loginImageEnabled")
+        # Prefer a real factory logo for site branding after full save.
+        fav = factory_in.get("faviconFactoryId")
+        for f in factories:
+            if fav and str(f.get("id")) == str(fav) and f.get("logoUrl"):
+                factory_in["brandingLogoUrl"] = f["logoUrl"]
+                break
+        else:
+            named_logo = next((f.get("logoUrl") for f in factories if f.get("logoUrl")), None)
+            if named_logo:
+                factory_in["brandingLogoUrl"] = named_logo
+        factory_in = _normalize_factory_cfg(factory_in)
+
+        # Persist factory / department / zone tree when client sends factories list
+        if "factories" in factory_in:
+            tree = replace_factories_tree(db, factory_in.get("factories") or [])
+            factory_in["factories"] = tree
+        incoming["factory"] = sync_factory_branding_json(db, factory_in)
+
     if row:
         row.config_json = json.dumps(incoming)
     else:
         db.add(SiteConfig(config_json=json.dumps(incoming)))
     db.commit()
-    return merge_config(incoming)
+    return attach_factories_to_config(db, merge_config(incoming))
 
 
 @router.post("/factory-logo")
-def upload_factory_logo(file: UploadFile = File(...), _=Depends(require_role("admin"))):
-    ext = Path(file.filename).suffix or ".png"
+async def upload_factory_logo(
+    file: UploadFile = File(...),
+    factory_id: Optional[str] = Query(None),
+    set_as_favicon: bool = Query(True),
+    db: Session = Depends(get_db),
+    _=Depends(require_role("admin")),
+):
+    """Upload a factory logo and optionally persist logoUrl onto that factory in site config."""
+    from ..upload_limits import MAX_IMAGE_BYTES, save_upload_limited
+
+    ext = Path(file.filename or "").suffix.lower() or ".png"
+    if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp"}:
+        ext = ".png"
     fname = f"factory_logo_{uuid.uuid4().hex[:8]}{ext}"
     fpath = FACTORY_DIR / fname
-    with open(fpath, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    return {"logoUrl": f"/static/factory/{fname}"}
+    written = await save_upload_limited(file, fpath, MAX_IMAGE_BYTES)
+    if written <= 0:
+        if fpath.exists():
+            fpath.unlink(missing_ok=True)
+        raise HTTPException(400, "Empty logo file")
+
+    logo_url = f"/static/factory/{fname}"
+
+    # Persist logo onto an existing named factory, or as draft branding until Save.
+    # Never create nameless factory rows — those showed up as "—" in Factory Setup.
+    if factory_id:
+        row = db.query(SiteConfig).first()
+        cfg = {}
+        if row and row.config_json:
+            try:
+                cfg = json.loads(row.config_json) or {}
+            except Exception:
+                cfg = {}
+        factory_cfg = dict(cfg.get("factory") or {})
+        factories = list(factory_cfg.get("factories") or [])
+        found = update_factory_logo(db, str(factory_id), logo_url)
+        if not found:
+            for item in factories:
+                if str(item.get("id")) == str(factory_id):
+                    item["logoUrl"] = logo_url
+                    found = True
+                    break
+        if not found:
+            draft = dict(factory_cfg.get("draftLogos") or {})
+            draft[str(factory_id)] = logo_url
+            factory_cfg["draftLogos"] = draft
+        else:
+            factory_cfg["factories"] = factories
+        factory_cfg["brandingLogoUrl"] = logo_url
+        if set_as_favicon:
+            factory_cfg["faviconFactoryId"] = factory_id
+        factory_cfg["configured"] = True
+        if not factory_cfg.get("siteTitle"):
+            factory_cfg["siteTitle"] = DEFAULT_SITE_TITLE
+        factory_cfg = _normalize_factory_cfg(factory_cfg)
+        factory_cfg = sync_factory_branding_json(db, factory_cfg)
+        cfg["factory"] = factory_cfg
+        if row:
+            row.config_json = json.dumps(cfg)
+        else:
+            db.add(SiteConfig(config_json=json.dumps(cfg)))
+        db.commit()
+
+    return {
+        "logoUrl": logo_url,
+        "factoryId": factory_id,
+        "bytes": written,
+        "path": str(fpath),
+    }
+
+
+@router.post("/login-image")
+async def upload_login_image(
+    file: UploadFile = File(...),
+    enable: bool = Query(True),
+    db: Session = Depends(get_db),
+    _=Depends(require_role("admin")),
+):
+    """Upload login-screen company image (separate from factory logo / favicon)."""
+    from ..upload_limits import MAX_IMAGE_BYTES, save_upload_limited
+
+    ext = Path(file.filename or "").suffix.lower() or ".png"
+    if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}:
+        ext = ".png"
+    fname = f"login_image_{uuid.uuid4().hex[:8]}{ext}"
+    fpath = FACTORY_DIR / fname
+    written = await save_upload_limited(file, fpath, MAX_IMAGE_BYTES)
+    if written <= 0:
+        if fpath.exists():
+            fpath.unlink(missing_ok=True)
+        raise HTTPException(400, "Empty login image file")
+
+    image_url = f"/static/factory/{fname}"
+    row = db.query(SiteConfig).first()
+    cfg = {}
+    if row and row.config_json:
+        try:
+            cfg = json.loads(row.config_json) or {}
+        except Exception:
+            cfg = {}
+    factory_cfg = dict(cfg.get("factory") or {})
+    factory_cfg["loginImageUrl"] = image_url
+    factory_cfg["loginImageEnabled"] = bool(enable)
+    factory_cfg["configured"] = True
+    if not factory_cfg.get("siteTitle"):
+        factory_cfg["siteTitle"] = DEFAULT_SITE_TITLE
+    factory_cfg = _normalize_factory_cfg(factory_cfg)
+    factory_cfg = sync_factory_branding_json(db, factory_cfg)
+    cfg["factory"] = factory_cfg
+    if row:
+        row.config_json = json.dumps(cfg)
+    else:
+        db.add(SiteConfig(config_json=json.dumps(cfg)))
+    db.commit()
+
+    return {
+        "loginImageUrl": image_url,
+        "loginImageEnabled": bool(enable),
+        "bytes": written,
+        "path": str(fpath),
+    }

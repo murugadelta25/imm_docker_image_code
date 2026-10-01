@@ -8,6 +8,8 @@
 #    ./run.sh restart      Restart services
 #    ./run.sh status       Show service status
 #    ./run.sh logs         Tail both service logs
+#    ./run.sh preflight    Safe DB backup + schema checks only
+#    ./run.sh help         Show this help
 # =============================================================
 
 set -e
@@ -90,6 +92,23 @@ cmd_logs() {
   sudo journalctl -u "${BACKEND_SERVICE}" -u "${FRONTEND_SERVICE}" -f --no-pager
 }
 
+show_usage() {
+  echo "Usage: ./run.sh [start|stop|restart|status|logs|preflight|help]"
+}
+
+cmd_preflight() {
+  ensure_deploy_config
+  print_banner
+  log_step "[preflight] Running safe deployment checks..."
+  bash "$SCRIPTS_DIR/install-deps.sh"
+  ensure_backend_env
+  configure_frontend_env
+  bash "$SCRIPTS_DIR/setup-database.sh"
+  log_ok "Preflight complete"
+  log_info "Dependencies verified, DB backup created if needed, migrations/schema guard applied"
+  log_info "Next steps: git pull && ./run.sh restart"
+}
+
 cmd_restart() {
   ensure_deploy_config
   print_banner
@@ -152,14 +171,18 @@ cmd_start() {
 }
 
 case "$ACTION" in
+  help|--help|-h)
+    show_usage
+    ;;
   stop)    cmd_stop ;;
   status)  cmd_status ;;
   logs)    cmd_logs ;;
+  preflight) cmd_preflight ;;
   restart) cmd_restart ;;
   start|"") cmd_start ;;
   *)
     echo "Unknown command: $ACTION"
-    echo "Usage: ./run.sh [start|stop|restart|status|logs]"
+    show_usage
     exit 1
     ;;
 esac

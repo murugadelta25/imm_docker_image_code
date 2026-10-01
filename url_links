@@ -1,7 +1,0 @@
-  Dashboard URLs:
-    ➜  Local  : http://localhost:5174
-    ➜  Network: http://192.168.0.196:5174
-    ➜  Network: http://192.168.1.111:5174
-    ➜  Network: http://192.168.199.100:5174
-    ➜  Network: http://10.1.99.128:5174
-  API Docs  : http://192.168.0.196:8010/docs

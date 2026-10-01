@@ -12,6 +12,12 @@ import Login from './pages/Login';
 import PlatformLogin from './pages/platform/PlatformLogin';
 import FeatureModulesAdmin from './pages/platform/FeatureModulesAdmin';
 import Dashboard from './pages/Dashboard';
+import ImmDeviceMonitor from './pages/ImmDeviceMonitor';
+import ImmFactoryDashboard from './pages/ImmFactoryDashboard';
+import ImmZoneDashboard from './pages/ImmZoneDashboard';
+import ImmEquipmentDetail from './pages/ImmEquipmentDetail';
+import ImmHistoryList from './pages/ImmHistoryList';
+import ImmKpiDashboard from './pages/ImmKpiDashboard';
 import DataEntry from './pages/DataEntry';
 import ModelChange from './pages/ModelChange';
 import Breakdown from './pages/Breakdown';
@@ -61,7 +67,19 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/autologin" element={<AutoLogin />} />
       <Route element={<AuthenticatedShell />}>
-        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/dashboard" element={<ImmFactoryDashboard />} />
+        <Route path="/imm/zone" element={<ImmZoneDashboard />} />
+        <Route path="/imm/zone/:zoneId" element={<ImmZoneDashboard />} />
+        <Route path="/imm/equipment" element={<ImmDeviceMonitor />} />
+        <Route path="/imm/devices" element={<Navigate to="/imm/equipment" replace />} />
+        <Route path="/oee-dashboard" element={<Dashboard />} />
+        <Route path="/imm/equipment/:machineId" element={<ImmEquipmentDetail />} />
+        <Route path="/imm/kpis" element={<ImmKpiDashboard />} />
+        <Route path="/imm/history" element={<Navigate to="/imm/kpis" replace />} />
+        <Route path="/imm/history/transfer-rate" element={<Navigate to="/imm/kpis" replace />} />
+        <Route path="/imm/history/hit-rate" element={<Navigate to="/imm/kpis" replace />} />
+        <Route path="/imm/history/equipment-parameter" element={<Navigate to="/imm/kpis" replace />} />
+        <Route path="/imm/history/records" element={<ImmHistoryList />} />
         <Route path="/planning" element={<ProductionPlanning />} />
         <Route path="/work-orders" element={<WorkOrderManagement />} />
         <Route path="/entry" element={<DataEntry />} />
@@ -78,6 +96,7 @@ function AppRoutes() {
         <Route path="/qc-approvals" element={<QcApprovals />} />
         <Route path="/parts" element={<PartManagement />} />
         <Route path="/tools" element={<ToolManagement />} />
+        <Route path="/molds" element={<ToolManagement />} />
         <Route path="/wi-revisions" element={<WorkInstructionRevision />} />
         <Route path="/users" element={<UserManagement />} />
         <Route path="/operators" element={<OperatorManagement />} />

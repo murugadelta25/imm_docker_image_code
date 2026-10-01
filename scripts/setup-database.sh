@@ -15,6 +15,27 @@ log_ok "MySQL running"
 
 log_step "[db] Checking database '${DB_NAME}'..."
 
+backup_database_if_exists() {
+  local ts backup_dir backup_file
+  if ! database_exists; then
+    return 0
+  fi
+  if ! command -v mysqldump >/dev/null 2>&1; then
+    log_warn "mysqldump not found — skipping pre-migration backup"
+    return 0
+  fi
+  ts=$(date +"%Y%m%d_%H%M%S")
+  backup_dir="$DATABASE_DIR/backups/preflight"
+  backup_file="$backup_dir/${DB_NAME}_preflight_${ts}.sql"
+  mkdir -p "$backup_dir"
+  if MYSQL_PWD="${DB_PASS}" mysqldump -u "$DB_USER" -h localhost --single-transaction --routines --triggers "$DB_NAME" > "$backup_file" 2>/dev/null; then
+    log_ok "Backup created: $backup_file"
+  else
+    log_warn "Backup failed (continuing): $backup_file"
+    rm -f "$backup_file" 2>/dev/null || true
+  fi
+}
+
 apply_database_migrations() {
   for sql in "$DATABASE_DIR"/migrate_*.sql; do
     [ -f "$sql" ] || continue
@@ -24,11 +45,34 @@ apply_database_migrations() {
   done
 }
 
+run_schema_guard() {
+  local py
+  if [ -x "$BACKEND_DIR/.venv/bin/python3" ]; then
+    py="$BACKEND_DIR/.venv/bin/python3"
+  elif [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
+    py="$BACKEND_DIR/.venv/bin/python"
+  elif [ -x "$BACKEND_DIR/venv/bin/python3" ]; then
+    py="$BACKEND_DIR/venv/bin/python3"
+  elif [ -x "$BACKEND_DIR/venv/bin/python" ]; then
+    py="$BACKEND_DIR/venv/bin/python"
+  else
+    py="python3"
+  fi
+  log_step "[db] Running schema guard (IMM + base integration)..."
+  (
+    cd "$BACKEND_DIR"
+    "$py" ensure_customer_db.py
+  )
+  log_ok "Schema guard complete"
+}
+
 if database_exists; then
   log_info "Database '${DB_NAME}' already exists — applying migrations"
+  backup_database_if_exists
   export MYSQL_PWD="${DB_PASS}"
   apply_database_migrations
   unset MYSQL_PWD
+  run_schema_guard
   log_ok "Database migrations complete (${DB_NAME})"
   exit 0
 fi
@@ -61,4 +105,5 @@ if [ -f "$DATABASE_DIR/seed_minimal.sql" ]; then
 fi
 
 unset MYSQL_PWD
+run_schema_guard
 log_ok "Database setup complete (${DB_NAME})"

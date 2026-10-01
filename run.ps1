@@ -1,13 +1,20 @@
 # Titan OEE + CPLM UI - Windows quick launcher
-# Usage: .\run.ps1
+# Usage:
+#   .\run.ps1
+#   .\run.ps1 preflight
+#   .\run.ps1 help
 # Note: ASCII-only output for Windows PowerShell encoding compatibility
+
+param(
+    [string]$Action = "start"
+)
 
 $ErrorActionPreference = "Stop"
 $ProjectDir = $PSScriptRoot
 $BackendDir = Join-Path $ProjectDir "backend"
 $FrontendDir = Join-Path $ProjectDir "frontend"
-$BackendPort = 8010
-$FrontendPort = 5174
+$BackendPort = 8040
+$FrontendPort = 5184
 $TotalSteps = 8
 
 function Get-PrimaryLanIp {
@@ -59,29 +66,115 @@ function Write-StepFail {
     Write-Host "  [FAIL] $Message" -ForegroundColor Red
 }
 
+function Show-Usage {
+    Write-BannerLine
+    Write-Host "  EAP PMS - Windows launcher" -ForegroundColor Cyan
+    Write-BannerLine
+    Write-Host ""
+    Write-Host "Usage:" -ForegroundColor White
+    Write-Host "  .\run.ps1           Start application" -ForegroundColor Gray
+    Write-Host "  .\run.ps1 preflight Safe DB backup + schema checks only" -ForegroundColor Gray
+    Write-Host "  .\run.ps1 help      Show this help" -ForegroundColor Gray
+    Write-Host ""
+}
+
 function Get-DatabaseCredentials {
     $configFile = Join-Path $ProjectDir "database\db.config.json"
     if (Test-Path $configFile) {
         $raw = Get-Content $configFile -Raw | ConvertFrom-Json
         return @{
-            User     = if ($raw.user) { [string]$raw.user } else { "root" }
-            Password = [string]$raw.password
-            Database = [string]$raw.database
+            User       = if ($raw.user) { [string]$raw.user } else { "root" }
+            Password   = [string]$raw.password
+            Database   = [string]$raw.database
+            ClientName = if ($raw.clientName) { [string]$raw.clientName } else { "" }
         }
     }
     $envFile = Join-Path $BackendDir ".env"
     if (-not (Test-Path $envFile)) {
-        return @{ User = "root"; Password = ""; Database = "eap_pms" }
+        return @{ User = "root"; Password = ""; Database = "eap_pms"; ClientName = "" }
     }
     $line = Get-Content $envFile | Where-Object { $_ -match '^DATABASE_URL=' } | Select-Object -First 1
     if ($line -match 'mysql\+pymysql://([^:]+):([^@]+)@[^/]+/([^?]+)') {
         return @{
-            User     = $Matches[1]
-            Password = [uri]::UnescapeDataString($Matches[2])
-            Database = $Matches[3]
+            User       = $Matches[1]
+            Password   = [uri]::UnescapeDataString($Matches[2])
+            Database   = $Matches[3]
+            ClientName = ""
         }
     }
-    return @{ User = "root"; Password = ""; Database = "eap_pms" }
+    return @{ User = "root"; Password = ""; Database = "eap_pms"; ClientName = "" }
+}
+
+function ConvertTo-DbSlug {
+    param([string]$Name)
+    $slug = ($Name -replace '[^a-zA-Z0-9_]', '_').ToLower()
+    $slug = $slug -replace '_+', '_'
+    $slug = $slug.Trim('_')
+    if (-not $slug) { $slug = "client" }
+    return $slug
+}
+
+function Ensure-CustomerDbConfig {
+    $configFile = Join-Path $ProjectDir "database\db.config.json"
+    if (Test-Path $configFile) {
+        $raw = Get-Content $configFile -Raw | ConvertFrom-Json
+        if ($raw.clientName -and $raw.database -and ($null -ne $raw.password)) {
+            return
+        }
+        Write-Host "  database\db.config.json is incomplete - re-entering customer details..." -ForegroundColor Yellow
+    } else {
+        Write-Host ""
+        Write-Host "  First-time setup: enter customer / plant details" -ForegroundColor Yellow
+        Write-Host "  Saved to database\db.config.json - a new MySQL DB will be created" -ForegroundColor DarkGray
+        Write-Host ""
+    }
+
+    $clientName = ""
+    while (-not $clientName) {
+        $clientName = (Read-Host "  Customer / plant name (e.g. Acme_Chennai_Plant)").Trim()
+        if (-not $clientName) {
+            Write-Host "  Customer name is required." -ForegroundColor Red
+        }
+    }
+
+    $defaultDb = "eap_pms_$(ConvertTo-DbSlug $clientName)"
+    $dbName = (Read-Host "  Database name [$defaultDb]").Trim()
+    if (-not $dbName) { $dbName = $defaultDb }
+
+    $secure = Read-Host "  MySQL password (root)" -AsSecureString
+    $dbPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+    if (-not $dbPassword) {
+        throw "MySQL password is required for first-time setup."
+    }
+
+    $dbUser = "root"
+    $cfgObj = [ordered]@{
+        clientName     = $clientName
+        user           = $dbUser
+        password       = $dbPassword
+        database       = $dbName
+        migrate        = $false
+        legacyDatabase = "titan_oee"
+        mysql          = [ordered]@{
+            host     = "localhost"
+            port     = 3306
+            user     = $dbUser
+            password = $dbPassword
+        }
+    }
+    $json = $cfgObj | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($configFile, $json + "`n", [System.Text.UTF8Encoding]::new($false))
+
+    . (Join-Path $ProjectDir "database\DbConfig.ps1")
+    $cfg = Get-DbConfig -ProjectDir $ProjectDir
+    Sync-BackendEnv -DbConfig $cfg -PreserveSmtp
+
+    Write-Host ""
+    Write-Host "  [OK] Saved database\db.config.json" -ForegroundColor Green
+    Write-Host "  Customer : $clientName" -ForegroundColor DarkGray
+    Write-Host "  Database : $dbName" -ForegroundColor DarkGray
+    Write-Host ""
 }
 
 function Get-MySqlExe {
@@ -94,6 +187,20 @@ function Get-MySqlExe {
         if (Test-Path $path) { return $path }
     }
     $cmd = Get-Command mysql -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+function Get-MySqlDumpExe {
+    $candidates = @(
+        "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe",
+        "C:\Program Files\MySQL\MySQL Server 8.4\bin\mysqldump.exe",
+        "C:\xampp\mysql\bin\mysqldump.exe"
+    )
+    foreach ($path in $candidates) {
+        if (Test-Path $path) { return $path }
+    }
+    $cmd = Get-Command mysqldump -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     return $null
 }
@@ -134,6 +241,33 @@ function Invoke-MySql {
     return $output
 }
 
+function Backup-Database {
+    param(
+        [string]$MySqlDumpExe,
+        [hashtable]$DbCreds,
+        [string]$ProjectDir
+    )
+    if (-not $MySqlDumpExe) {
+        Write-Host "  [WARN] mysqldump not found - skipping preflight backup" -ForegroundColor Yellow
+        return
+    }
+    $backupDir = Join-Path $ProjectDir "database\backups\preflight"
+    New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+    $ts = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backupFile = Join-Path $backupDir ("{0}_preflight_{1}.sql" -f $DbCreds.Database, $ts)
+    $env:MYSQL_PWD = $DbCreds.Password
+    try {
+        & $MySqlDumpExe "--user=$($DbCreds.User)" "--host=localhost" "--single-transaction" "--routines" "--triggers" $DbCreds.Database "--result-file=$backupFile" 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $backupFile)) {
+            Write-StepOk ("Backup created: {0}" -f $backupFile)
+        } else {
+            Write-Host "  [WARN] Backup failed - continuing" -ForegroundColor Yellow
+        }
+    } finally {
+        Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-FileHashHex {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return "" }
@@ -145,7 +279,6 @@ function Test-VenvBelongsToProject {
     $cfg = Join-Path $VenvDir "pyvenv.cfg"
     if (-not (Test-Path $cfg)) { return $false }
     $raw = Get-Content $cfg -Raw
-    # Reject venvs created for another project (common when folders were copied)
     if ($raw -match '(?im)^command\s*=\s*(.+)$') {
         $cmd = $Matches[1].Trim()
         $expectedNorm = [System.IO.Path]::GetFullPath($ExpectedBackendDir).TrimEnd('\')
@@ -158,7 +291,6 @@ function Test-VenvBelongsToProject {
 }
 
 function Ensure-BackendDependencies {
-    # Prefer .venv (avoids locked legacy backend\venv from old runs / other projects)
     $venvDir = Join-Path $BackendDir ".venv"
     $legacyVenv = Join-Path $BackendDir "venv"
     $venvPython = Join-Path $venvDir "Scripts\python.exe"
@@ -174,6 +306,10 @@ function Ensure-BackendDependencies {
     if (-not $py) { throw "python not found on PATH. Install Python 3.11+ and retry." }
 
     $venvOk = (Test-Path $venvPython) -and (Test-VenvBelongsToProject -VenvDir $venvDir -ExpectedBackendDir $expectedBackend)
+    if ($venvOk) {
+        $null = & $venvPython -c "import fastapi, uvicorn" 2>&1
+        if ($LASTEXITCODE -ne 0) { $venvOk = $false }
+    }
     if (-not $venvOk) {
         if (Test-Path $venvDir) {
             Write-Host "  Replacing stale backend\.venv..." -ForegroundColor Yellow
@@ -254,6 +390,17 @@ function Ensure-FrontendDependencies {
     }
 }
 
+if ($Action -ieq "help" -or $Action -ieq "--help" -or $Action -ieq "-h") {
+    Show-Usage
+    exit 0
+}
+
+if (@("start", "preflight") -notcontains $Action.ToLowerInvariant()) {
+    Write-StepFail ("Unknown action: {0}" -f $Action)
+    Show-Usage
+    exit 1
+}
+
 Write-BannerLine
 Write-Host "  EAP PMS - Starting Application" -ForegroundColor Cyan
 Write-BannerLine
@@ -269,8 +416,14 @@ try {
     exit 1
 }
 
-# [2/8] MySQL
-Write-StepHeader 2 "Checking MySQL..."
+# [2/8] First-time customer config + MySQL
+Write-StepHeader 2 "Checking MySQL / customer database config..."
+try {
+    Ensure-CustomerDbConfig
+} catch {
+    Write-StepFail ("Customer setup failed: {0}" -f $_.Exception.Message)
+    exit 1
+}
 $mysqlExe = Get-MySqlExe
 $dbCreds = Get-DatabaseCredentials
 if (-not $mysqlExe) {
@@ -279,25 +432,31 @@ if (-not $mysqlExe) {
 }
 try {
     $null = Invoke-MySql -MySqlExe $mysqlExe -User $dbCreds.User -Password $dbCreds.Password -Query "SELECT 1"
-    Write-StepOk "MySQL running"
+    Write-StepOk ("MySQL running (customer DB target: {0})" -f $dbCreds.Database)
 } catch {
-    Write-StepFail "Cannot connect to MySQL. Start the MySQL service and check backend\.env"
+    Write-StepFail "Cannot connect to MySQL. Check the password entered for first-time setup."
     exit 1
 }
 
 # [3/8] Database
 Write-StepHeader 3 "Setting up database..."
 if (-not (Test-Path $venvPython)) {
-    Write-StepFail "backend\venv missing. Dependency step should have created it."
+    Write-StepFail "backend\.venv missing. Dependency step should have created it."
     exit 1
 }
 $initScript = Join-Path $ProjectDir "database\init_database.ps1"
 if (-not (Test-Path (Join-Path $ProjectDir "database\db.config.json"))) {
-    Write-StepFail "database\db.config.json not found. Copy database\db.config.example.json and edit it."
+    Write-StepFail "database\db.config.json missing after customer setup."
     exit 1
 }
 try {
+    $mySqlDumpExe = Get-MySqlDumpExe
+    Backup-Database -MySqlDumpExe $mySqlDumpExe -DbCreds $dbCreds -ProjectDir $ProjectDir
     & $initScript -ProjectDir $ProjectDir | Out-Host
+    $ensurePy = Join-Path $BackendDir "ensure_customer_db.py"
+    if (Test-Path $ensurePy) {
+        & $venvPython $ensurePy | Out-Host
+    }
     $dbCreds = Get-DatabaseCredentials
     $schema = $dbCreds.Database
     $escapedSchema = $schema.Replace("'", "''")
@@ -307,10 +466,26 @@ try {
         Write-Host "  Database looks empty - run database\restore_from_package.ps1 to import package data" -ForegroundColor Yellow
     }
     Write-StepOk ("Database ready ({0}, {1} tables)" -f $schema, $tableCount)
+    Write-StepOk "Schema guard complete"
 } catch {
     Write-StepFail ("Database setup failed: {0}" -f $_.Exception.Message)
-    Write-Host "  Tip: edit database\db.config.json or run database\setup_new_client.ps1" -ForegroundColor Yellow
+    Write-Host "  Tip: delete database\db.config.json and re-run .\run.ps1 to enter a new customer name" -ForegroundColor Yellow
     exit 1
+}
+
+if ($Action -ieq "preflight") {
+    Write-Host ""
+    Write-BannerLine
+    Write-Host "  Preflight complete" -ForegroundColor Green
+    Write-BannerLine
+    Write-Host ""
+    Write-Host "  Verified dependencies, created DB backup if needed," -ForegroundColor White
+    Write-Host "  applied migrations, and ran schema guard." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Next steps:" -ForegroundColor White
+    Write-Host "    git pull" -ForegroundColor Green
+    Write-Host "    .\run.ps1" -ForegroundColor Green
+    exit 0
 }
 
 # [4/8] Network + frontend env (Vite proxy mode for LAN access)
@@ -329,11 +504,15 @@ if ($networkIPs.Count -eq 0) {
     Write-StepOk ("Network configured ({0}, Vite proxy enabled)" -f ($networkIPs -join ', '))
 }
 
-# [5/8] Backend — always use this project's backend\venv
+# [5/8] Backend — always use this project's backend\.venv python (no Activate.ps1 required)
 Write-StepHeader 5 "Starting backend on port $BackendPort..."
+if (-not (Test-Path $venvPython)) {
+    Write-StepFail "backend\.venv\Scripts\python.exe missing after dependency setup."
+    exit 1
+}
+$backendCmd = "Set-Location -LiteralPath '$BackendDir'; & '$venvPython' -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload"
 Start-Process powershell -ArgumentList @(
-    "-NoExit", "-Command",
-    "cd '$BackendDir'; & '.\.venv\Scripts\Activate.ps1'; python -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload"
+    "-NoExit", "-Command", $backendCmd
 ) -WindowStyle Normal
 Start-Sleep -Seconds 3
 $backendOk = $false
@@ -386,7 +565,7 @@ try {
     Write-StepOk ("Standard URL ready: {0}" -f $domainCfg.Url)
 } catch {
     Write-StepFail ("nginx setup failed: {0}" -f $_.Exception.Message)
-    Write-Host "  Tip: run PowerShell as Administrator (port 80 + hosts file). Direct URLs on :5174 still work." -ForegroundColor Yellow
+    Write-Host "  Tip: run PowerShell as Administrator (port 80 + hosts file). Direct URLs on :5184 still work." -ForegroundColor Yellow
     $domainCfg = Get-DomainConfig
 }
 

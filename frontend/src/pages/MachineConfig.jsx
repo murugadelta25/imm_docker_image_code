@@ -8,7 +8,10 @@ import { useAuth } from '../context/AuthContext';
 import { getFactoryLines } from '../utils/factoryHelpers';
 import PageHeader from '../components/PageHeader';
 
-const MACHINE_TYPES = ['CNC', 'VMC', 'Lathe', 'Grinding', 'Drilling', 'Milling', 'Inspection', 'Other'];
+const MACHINE_TYPES = [
+  'IMM', 'Taichung Seiki', 'Sumitomo',
+  'CNC', 'VMC', 'Lathe', 'Grinding', 'Drilling', 'Milling', 'Inspection', 'Other',
+];
 
 const STATUS_CFG = {
   running:        { color: '#10b981', label: 'Running',        icon: '▶' },
@@ -28,7 +31,7 @@ export default function MachineConfig() {
   const [msg, setMsg] = useState('');
 
   const [machineForm, setMachineForm] = useState({
-    name: '', station_id: '', machine_type: 'CNC', make: '', model_no: '',
+    name: '', station_id: '', machine_type: 'IMM', make: '', model_no: '',
     tonnage: '', features: '', location: ''
   });
   const [editMachineId, setEditMachineId] = useState(null);
@@ -62,7 +65,7 @@ export default function MachineConfig() {
 
   const openAddMachine = () => {
     setMachineForm({
-      name: '', station_id: '', machine_type: 'CNC', make: '', model_no: '',
+      name: '', station_id: '', machine_type: 'IMM', make: '', model_no: '',
       tonnage: '', features: '', location: ''
     });
     setEditMachineId(null);
@@ -74,7 +77,7 @@ export default function MachineConfig() {
 
   const openEditMachine = (m) => {
     setMachineForm({
-      name: m.name, station_id: m.station_id, machine_type: m.machine_type || 'CNC',
+      name: m.name, station_id: m.station_id, machine_type: m.machine_type || 'IMM',
       make: m.make || '', model_no: m.model_no || '', tonnage: m.tonnage || '',
       features: m.features || '', location: m.location || ''
     });
@@ -208,7 +211,7 @@ export default function MachineConfig() {
                     </select>
                   </CF>
                   <CF label="Make / Brand" t={t}>
-                    <input style={s.inp} value={machineForm.make} placeholder="e.g. Fanuc, Mazak"
+                    <input style={s.inp} value={machineForm.make} placeholder="e.g. Taichung Seiki, Sumitomo"
                       onChange={e => setMachineForm(p => ({ ...p, make: e.target.value }))} />
                   </CF>
                   <CF label="Model No" t={t}>
@@ -339,7 +342,7 @@ export default function MachineConfig() {
                         <td style={s.td}>
                           <span style={{ padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600,
                                          background: t.accent + '22', color: t.accent }}>
-                            {m.machine_type || 'CNC'}
+                            {m.machine_type || 'IMM'}
                           </span>
                         </td>
                         <td style={s.td}>

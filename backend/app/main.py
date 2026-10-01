@@ -22,6 +22,11 @@ from .routers import machine_kpi as machine_kpi_router
 from .routers import archive as archive_router
 from .routers import mobile as mobile_router
 from .routers import operators as operators_router
+from .routers import imm_monitor as imm_monitor_router
+from .routers import imm_opcua as imm_opcua_router
+from .routers import imm_dashboard as imm_dashboard_router
+from .routers import imm_history_dash as imm_history_dash_router
+from .routers import imm_nodered as imm_nodered_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -168,11 +173,25 @@ async def lifespan(app: FastAPI):
     _ensure_work_instruction_tables()
     _ensure_deviation_alert_table()
     try:
+        from .models import ensure_factory_schema
+        from .factory_structure import migrate_json_factories_if_empty
+        ensure_factory_schema()
         db = next(get_db())
         try:
+            if migrate_json_factories_if_empty(db):
+                db.commit()
+                print("[OK] Migrated factory/zone JSON into relational tables")
+            try:
+                from .factory_structure import backfill_zone_stations_from_machines
+                n = backfill_zone_stations_from_machines(db)
+                if n:
+                    db.commit()
+                    print(f"[OK] Linked {n} machine station(s) to zones from location paths")
+            except Exception as be:
+                print(f"[WARN] zone station backfill skipped: {be}")
             start_scheduler(db)
         except Exception as e:
-            print(f"[WARN] Scheduler start failed (app will still run): {e}")
+            print(f"[WARN] Scheduler/factory migrate failed (app will still run): {e}")
         finally:
             db.close()
     except Exception as e:
@@ -209,6 +228,11 @@ app.include_router(machine_kpi_router.router)
 app.include_router(archive_router.router)
 app.include_router(mobile_router.router)
 app.include_router(operators_router.router)
+app.include_router(imm_monitor_router.router)
+app.include_router(imm_opcua_router.router)
+app.include_router(imm_dashboard_router.router)
+app.include_router(imm_history_dash_router.router)
+app.include_router(imm_nodered_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"
