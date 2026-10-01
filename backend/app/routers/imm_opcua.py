@@ -19,7 +19,6 @@ from ..opcua_imm import (
     load_catalog,
     poll_machine_opcua,
     seed_param_defs,
-    simulate_demo_samples,
 )
 
 router = APIRouter(prefix="/api/imm/opcua", tags=["imm-opcua"])
@@ -214,6 +213,5 @@ def simulate(
     db: Session = Depends(get_db),
     _=Depends(require_role("admin", "supervisor")),
 ):
-    """Dev/demo: populate Dia Edge parameters with simulated values."""
-    _machine_or_404(db, machine_id)
-    return simulate_demo_samples(db, machine_id)
+    """Disabled — dashboards use live Node-RED / OPC UA values only."""
+    raise HTTPException(410, "Demo OPC UA simulation is disabled; use live Node-RED push data")

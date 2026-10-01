@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import random
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
@@ -48,6 +47,52 @@ COMPONENT_LABELS = {
     "screwTip": "Injection Tip",
     "nozzle": "Nozzle",
 }
+
+
+def _dedupe_active_components(db: Session, machine_id: int) -> int:
+    """Keep one active row per component_type (newest id). Deactivate extras.
+
+    Concurrent _ensure_defaults / Change calls can insert duplicates; both stay
+    is_active=1 and the Equipment Dashboard renders them twice.
+    """
+    rows = (
+        db.query(ImmKeyComponent)
+        .filter(ImmKeyComponent.machine_id == machine_id, ImmKeyComponent.is_active == 1)
+        .order_by(ImmKeyComponent.component_type, ImmKeyComponent.id.desc())
+        .all()
+    )
+    seen = set()
+    deactivated = 0
+    for row in rows:
+        key = row.component_type
+        if key in seen:
+            row.is_active = 0
+            deactivated += 1
+        else:
+            seen.add(key)
+    return deactivated
+
+
+def _active_components(db: Session, machine_id: int) -> List[ImmKeyComponent]:
+    """Return at most one active component per type, in display order."""
+    deactivated = _dedupe_active_components(db, machine_id)
+    if deactivated:
+        db.commit()
+    rows = (
+        db.query(ImmKeyComponent)
+        .filter(ImmKeyComponent.machine_id == machine_id, ImmKeyComponent.is_active == 1)
+        .order_by(ImmKeyComponent.id.desc())
+        .all()
+    )
+    by_type = {}
+    for row in rows:
+        if row.component_type not in by_type:
+            by_type[row.component_type] = row
+    ordered = [by_type[t] for t in COMPONENT_TYPES if t in by_type]
+    for t, row in by_type.items():
+        if t not in COMPONENT_TYPES:
+            ordered.append(row)
+    return ordered
 
 
 def _map_imm_status(eap_imm_status: str, err_msgs: List[str] = None) -> dict:
@@ -158,7 +203,11 @@ def _check_kpiv_alerts(db: Session, machine_id: int) -> List[str]:
 
 
 def _ensure_defaults(db: Session, machine_id: int):
-    """Seed mold / components / thresholds / recent samples when empty."""
+    """Ensure mold / component / threshold rows exist (no simulated OPC/KPIV samples).
+
+    Spec / Start / Expected life for key components are stored in DB
+    (imm_key_components). They are NOT received from Node-RED OPC UA payloads.
+    """
     mold = (
         db.query(ImmMold)
         .filter(ImmMold.machine_id == machine_id, ImmMold.is_active == 1)
@@ -168,13 +217,16 @@ def _ensure_defaults(db: Session, machine_id: int):
         mold = ImmMold(
             machine_id=machine_id,
             mold_no=f"MOLD-{machine_id:04d}",
-            usage_count=random.randint(5000, 250000),
+            usage_count=0,
             usage_max=1000000,
-            cycles_after_maintenance=random.randint(1000, 20000),
+            cycles_after_maintenance=0,
             maintenance_limit=25000,
             is_active=1,
         )
         db.add(mold)
+
+    # Remove duplicate active components before seeding missing types
+    _dedupe_active_components(db, machine_id)
 
     for ctype in COMPONENT_TYPES:
         exists = (
@@ -200,7 +252,7 @@ def _ensure_defaults(db: Session, machine_id: int):
                     component_type=ctype,
                     spec_length=length,
                     spec_diameter=diameter,
-                    start_date=date.today() - timedelta(days=random.randint(30, 400)),
+                    start_date=date.today(),
                     expect_days=365,
                     is_active=1,
                 )
@@ -226,28 +278,6 @@ def _ensure_defaults(db: Session, machine_id: int):
             )
             db.add(thr)
 
-        count = (
-            db.query(ImmKpivSample)
-            .filter(ImmKpivSample.machine_id == machine_id, ImmKpivSample.tag == tag)
-            .count()
-        )
-        if count < 30:
-            now = now_ist()
-            # Seed ~24h of points so Equipment Detail time presets show distinct windows
-            for i in range(96):
-                noise = random.gauss(0, center * 0.03)
-                if tag == "injection_end" and i == 95 and machine_id % 5 == 0:
-                    val = (thr.upper or center * 1.15) + abs(noise) + 0.5
-                else:
-                    val = center + noise
-                db.add(
-                    ImmKpivSample(
-                        machine_id=machine_id,
-                        tag=tag,
-                        value=round(val, 3),
-                        recorded_at=now - timedelta(minutes=(96 - i) * 15),
-                    )
-                )
     db.commit()
 
 
@@ -361,11 +391,7 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
         .order_by(ImmMold.is_active.desc(), ImmMold.mold_no)
         .all()
     )
-    components = (
-        db.query(ImmKeyComponent)
-        .filter(ImmKeyComponent.machine_id == machine_id, ImmKeyComponent.is_active == 1)
-        .all()
-    )
+    components = _active_components(db, machine_id)
     thresholds = (
         db.query(ImmKpivThreshold).filter(ImmKpivThreshold.machine_id == machine_id).all()
     )

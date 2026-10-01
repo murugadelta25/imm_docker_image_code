@@ -139,38 +139,40 @@ def _overview_status_counts(items: List[dict]) -> dict:
 
 
 def _zone_achievement(zone_machines: List[dict], stock_in: int, finished: int, zone_idx: int) -> dict:
-    planned = max(1, int(finished / max(len(zone_machines), 1))) if finished else 100
-    actual = max(0, int(stock_in / max(len(zone_machines), 1))) if stock_in else 0
-    if not actual and zone_machines:
-        run = sum(1 for x in zone_machines if x.get("imm_status") == "production")
-        planned = max(planned, run * 25 + zone_idx * 10)
-        actual = max(actual, run * 16 + zone_idx * 6)
+    """Live achievement from OPC UA Good/Target counts only (no invented demo qty)."""
+    n = max(len(zone_machines), 1)
+    planned = max(0, int(finished / n)) if finished else 0
+    actual = max(0, int(stock_in / n)) if stock_in else 0
     pct = round(100.0 * actual / planned, 1) if planned else 0.0
     return {"pct": pct, "actual": actual, "planned": planned}
 
 
-def _demo_utilization(zones: List[dict], shift_name: str = "Shift A") -> dict:
+def _live_utilization(zones: List[dict], shift_name: str = "Shift A") -> dict:
+    """Utilization placeholders from live running counts only (no synthetic uptime)."""
     by_zone = []
-    for idx, z in enumerate(zones):
-        uptime = round(180 + idx * 35 + (z.get("running") or 0) * 12, 1)
-        downtime = round(120 + idx * 18, 1)
+    for z in zones:
+        total = int(z.get("total") or 0)
+        running = int(z.get("running") or 0)
         by_zone.append({
             "id": z.get("id"),
             "name": z.get("name"),
-            "uptime_min": uptime,
-            "downtime_min": downtime,
-            "mttr_min": round(18 + idx * 4, 1),
-            "mtbf_min": round(240 + idx * 30, 1),
+            "uptime_min": None,
+            "downtime_min": None,
+            "mttr_min": None,
+            "mtbf_min": None,
+            "running": running,
+            "total": total,
+            "running_pct": round(100.0 * running / total, 1) if total else 0.0,
         })
-    total_up = sum(x["uptime_min"] for x in by_zone)
-    total_down = sum(x["downtime_min"] for x in by_zone)
+    total_m = sum(int(z.get("total") or 0) for z in zones)
+    run_m = sum(int(z.get("running") or 0) for z in zones)
     return {
         "shift_name": shift_name,
-        "uptime_min": round(total_up, 1),
-        "downtime_min": round(total_down, 1),
-        "mttr_min": round(22.0, 1) if by_zone else None,
-        "mtbf_min": round(260.0, 1) if by_zone else None,
-        "utilization_pct": round(100.0 * total_up / max(total_up + total_down, 1), 1),
+        "uptime_min": None,
+        "downtime_min": None,
+        "mttr_min": None,
+        "mtbf_min": None,
+        "utilization_pct": round(100.0 * run_m / total_m, 1) if total_m else 0.0,
         "by_line": by_zone,
     }
 
@@ -200,7 +202,7 @@ def _match_shift_at(cfg: dict, now: datetime) -> Optional[dict]:
 
 
 def _factory_running_rate_trend(db: Session, zones: List[dict]) -> dict:
-    """Hourly running rate per zone — real segments when logs exist, else demo curve."""
+    """Hourly running rate per zone from live zone running_pct (flat until status history exists)."""
     cfg = _load_config(db)
     sh = _match_shift_at(cfg, now_ist())
     if not sh:
@@ -216,10 +218,8 @@ def _factory_running_rate_trend(db: Session, zones: List[dict]) -> dict:
 
     lines = []
     for idx, z in enumerate(zones):
-        base = float(z.get("running_pct") or 55)
-        hourly = []
-        for i, _ in enumerate(slot_labels):
-            hourly.append(round(min(100.0, max(0.0, base + ((i * 7 + idx * 5) % 28) - 10)), 1))
+        live_pct = float(z.get("running_pct") or 0.0)
+        hourly = [live_pct for _ in slot_labels]
         lines.append({
             "id": z.get("id"),
             "name": z.get("name") or f"Zone {idx + 1}",
@@ -357,7 +357,7 @@ def _factory_dashboard_data(db: Session) -> dict:
     bad = _opcua_sum(db, mids, "Total_Bad_Count")
     prod = _opcua_sum(db, mids, "Actual_Production_Count")
     target = _opcua_sum(db, mids, "Production_Target_Count")
-    finished = target if target > 0 else (good + bad if (good + bad) > 0 else max(prod, 1))
+    finished = target if target > 0 else (good + bad if (good + bad) > 0 else prod)
     stock_in = good if good > 0 else prod
     transfer_pct = round(100.0 * stock_in / finished, 1) if finished else 0.0
 
@@ -387,10 +387,11 @@ def _factory_dashboard_data(db: Session) -> dict:
             seen.add(m["id"])
             uniq.append(m)
         ach = _zone_achievement(uniq, int(stock_in), int(finished), idx)
-        util_row = _demo_utilization([{
+        util_row = _live_utilization([{
             "id": z["id"],
             "name": z["name"],
             "running": sum(1 for x in uniq if x["imm_status"] == "production"),
+            "total": len(uniq),
         }], shift_name="Shift A")["by_line"]
         util_row = util_row[0] if util_row else {}
         zone_rows.append(
@@ -433,9 +434,9 @@ def _factory_dashboard_data(db: Session) -> dict:
     }
     cfg = _load_config(db)
     active_shift = _match_shift_at(cfg, now_ist())
-    utilization = _demo_utilization(zone_rows, shift_name=(active_shift or {}).get("name") or "Shift A")
+    utilization = _live_utilization(zone_rows, shift_name=(active_shift or {}).get("name") or "Shift A")
 
-    payload = {
+    return {
         "site_label": site_label,
         "factory_name": factory_name,
         "factories": factory_list,
@@ -462,139 +463,6 @@ def _factory_dashboard_data(db: Session) -> dict:
         "machines": items,
         "demo": False,
     }
-    return _enrich_factory_demo(payload)
-
-
-def _enrich_factory_demo(data: dict) -> dict:
-    """Fill chart-friendly demo values when live OPC/status data is sparse."""
-    zones = list(data.get("zones") or [])
-    machines = list(data.get("machines") or [])
-    rr = dict(data.get("running_rate") or {})
-    tr = dict(data.get("transfer_rate") or {})
-    total = int(rr.get("total") or len(machines) or 0)
-
-    # Demo running rate if nothing is producing yet
-    if total > 0 and int(rr.get("running") or 0) == 0:
-        demo_running = max(1, int(round(total * 0.72)))
-        rr = {
-            "pct": round(100.0 * demo_running / total, 1),
-            "running": demo_running,
-            "total": total,
-        }
-        data["demo"] = True
-
-    # Demo transfer if counts look empty / placeholder
-    if float(tr.get("pct") or 0) <= 0 or int(tr.get("finished_goods") or 0) <= 1:
-        tr = {"pct": 76.5, "stock_in": 3827, "finished_goods": 5000}
-        data["demo"] = True
-
-    # Per-zone demo bars
-    enriched_zones = []
-    for idx, z in enumerate(zones):
-        zz = dict(z)
-        zt = int(zz.get("total") or 0)
-        if zt > 0 and float(zz.get("running_pct") or 0) <= 0:
-            rp = round(55 + (idx * 11) % 35, 1)
-            run = max(1, int(round(zt * rp / 100)))
-            zz["running_pct"] = rp
-            zz["running"] = run
-            zz["hit_rate"] = round(min(100.0, rp + 8), 1)
-            data["demo"] = True
-        elif zt == 0:
-            # still show a visible bar for empty zones in demo mode
-            zz["running_pct"] = round(48 + (idx * 9) % 40, 1)
-            zz["running"] = 0
-            zz["hit_rate"] = zz["running_pct"]
-            data["demo"] = True
-        # line / station mini charts
-        line_stats = []
-        for li, line in enumerate(zz.get("lines") or []):
-            ll = dict(line)
-            if float(ll.get("running_pct") or 0) <= 0:
-                ll["running_pct"] = round(40 + ((idx + li) * 13) % 45, 1)
-                ll["running"] = max(ll.get("running") or 0, 1 if (ll.get("total") or 0) else 0)
-                data["demo"] = True
-            line_stats.append(ll)
-        zz["lines"] = line_stats or [
-            {
-                "id": f"{zz.get('id')}-demo",
-                "name": zz.get("name") or "Line",
-                "running_pct": zz.get("running_pct") or 62,
-                "running": zz.get("running") or 0,
-                "total": zt,
-                "machines": zz.get("machines") or [],
-            }
-        ]
-        # Keep live Motor/Heater status — never rewrite Offline/Stop to Idle/Running
-        mlist = []
-        for m in (zz.get("machines") or []):
-            mlist.append(dict(m))
-        zz["machines"] = mlist
-        enriched_zones.append(zz)
-
-    if not enriched_zones:
-        enriched_zones = [
-            {
-                "id": "demo-a",
-                "name": "1",
-                "factory_name": data.get("factory_name") or "",
-                "stations": [{"id": 1, "name": "Station 01"}],
-                "color": ZONE_COLORS[0],
-                "running_pct": 72.0,
-                "running": 1,
-                "total": 1,
-                "hit_rate": 81.0,
-                "lines": [{"id": "demo-line", "name": "1", "running_pct": 72.0, "running": 1, "total": 1, "machines": []}],
-                "machines": [],
-            }
-        ]
-        data["demo"] = True
-
-    data["running_rate"] = rr
-    data["transfer_rate"] = tr
-    data["zones"] = enriched_zones
-
-    ar = dict(data.get("achievement_rate") or {})
-    if float(ar.get("pct") or 0) <= 0:
-        ar = {"pct": tr.get("pct", 63), "actual": tr.get("stock_in", 63), "planned": tr.get("finished_goods", 100)}
-        data["demo"] = True
-    data["achievement_rate"] = ar
-
-    sc = dict(data.get("status_counts") or {})
-    if sum(sc.get(k, 0) for k in ("running", "idle", "stop", "breakdown", "alarm", "setting_change", "offline")) == 0:
-        total = int(rr.get("total") or len(machines) or 1)
-        run = int(rr.get("running") or max(1, total // 2))
-        data["status_counts"] = {
-            "running": run,
-            "idle": max(0, total - run),
-            "stop": 0,
-            "breakdown": 0,
-            "alarm": 0,
-            "setting_change": 0,
-            "offline": 0,
-            "total": total,
-        }
-        data["demo"] = True
-
-    if not data.get("utilization") or not (data.get("utilization") or {}).get("by_line"):
-        data["utilization"] = _demo_utilization(enriched_zones, shift_name="Shift A")
-        data["demo"] = True
-    else:
-        util = data["utilization"]
-        for idx, z in enumerate(enriched_zones):
-            if idx < len(util.get("by_line") or []):
-                row = util["by_line"][idx]
-                z["uptime_min"] = row.get("uptime_min")
-                z["downtime_min"] = row.get("downtime_min")
-                z["mttr_min"] = row.get("mttr_min")
-                z["mtbf_min"] = row.get("mtbf_min")
-            if not z.get("achievement_pct"):
-                ach = _zone_achievement(z.get("machines") or [], tr.get("stock_in", 0), tr.get("finished_goods", 100), idx)
-                z["achievement_pct"] = ach["pct"]
-                z["achievement_actual"] = ach["actual"]
-                z["achievement_planned"] = ach["planned"]
-
-    return data
 
 
 
@@ -704,40 +572,11 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
     prod_qty = num("Actual_Production_Count") or num("Total_Good_Count")
     cycle = num("Actual_Cycle_Time") or num("Last_Cycle_Time") or 0.0
     cavity = num("Actual_Cavity_No") or 0.0
-    has_live_opc = any(
-        (opcua.get(k) or {}).get("value_num") is not None
-        or (opcua.get(k) or {}).get("value_text")
-        for k in opcua
-    ) or prod_qty > 0 or cycle > 0
-    demo = False
-    if not has_live_opc:
-        prod_qty = prod_qty or 1280
-        cycle = cycle or 28.5
-        cavity = cavity or 4.0
-        demo = True
     uph = round(3600.0 / cycle, 1) if cycle > 0 else 0.0
-    if cavity <= 0:
-        cavity = 4.0
 
-    operate = payload.get("operate_mode") or "—"
-    if operate == "—" and has_live_opc:
-        operate = "Manual" if _operate_mode(opcua) == "Manual" else _operate_mode(opcua)
-
+    operate = payload.get("operate_mode") or _operate_mode(opcua) or "—"
     part_name = text("Actual_Material_Name")
     mold_name = text("Actual_Mold_Name")
-    if part_name == "—" and demo:
-        part_name = "DEMO-PART-01"
-    if mold_name == "—" and demo:
-        mold_name = "MOLD-DEMO-01"
-
-    # Never invent Running/Idle when machine is Offline/Stop (SIE not connected)
-    if demo and payload.get("imm_status") not in (
-        "production", "warning", "abnormal", "offline", "stop", "idle"
-    ):
-        payload = dict(payload)
-        payload["imm_status"] = "production"
-        payload["imm_status_label"] = "Running"
-        payload["imm_status_color"] = "#22c55e"
 
     # All machines for equipment picker (Machine Management)
     all_machines = db.query(Machine).order_by(Machine.station_id, Machine.name).all()
@@ -769,7 +608,7 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
             "status": payload["imm_status_label"],
             "status_key": payload["imm_status"],
             "status_color": payload["imm_status_color"],
-            "operate_status": operate if operate != "—" else (payload.get("operate_mode") or "Auto"),
+            "operate_status": operate if operate != "—" else "—",
             "warning_message": "; ".join(payload.get("err_msgs") or []) or "—",
             "part_name": part_name,
             "tool_number": mold_name,
@@ -777,15 +616,15 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
         "production": {
             "quantity": int(prod_qty),
             "uph": uph,
-            "total_run_hours": 6.5 if demo else None,
+            "total_run_hours": None,
             "actual_ct": cycle,
             "standard_ct": cycle,
             "actual_cav": cavity,
             "standard_cav": cavity,
         },
-        "demo": demo or bool(factory_data.get("demo")),
-        "siblings": [{"id": s.id, "name": s.name} for s in siblings],
-        "equipment_list": [{"id": eq.id, "name": eq.name} for eq in all_machines],
+        "siblings": [{"id": x.id, "name": x.name} for x in siblings],
+        "equipment_list": [{"id": x.id, "name": x.name} for x in all_machines],
+        "demo": False,
         "station": {
             "id": m.station_id,
             "name": payload["station_name"],

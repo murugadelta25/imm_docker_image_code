@@ -65,23 +65,11 @@ export default function ImmEquipmentDetail() {
   const [siblings, setSiblings] = useState([]);
   const [dashSummary, setDashSummary] = useState(null);
   const [zoneMeta, setZoneMeta] = useState([]);
-  const [noderedSync, setNoderedSync] = useState(null);
   const [kpivLoading, setKpivLoading] = useState(false);
 
   useEffect(() => {
     if (!shiftId && currentShift?.id) setShiftId(currentShift.id);
   }, [currentShift, shiftId]);
-
-  const syncNodeRed = useCallback(async () => {
-    try {
-      const r = await api.post(`/api/imm/nodered/equipment/${machineId}/sync`);
-      setNoderedSync(r.data);
-      return r.data?.ok;
-    } catch (err) {
-      setNoderedSync({ ok: false, error: err.response?.data?.detail || err.message });
-      return false;
-    }
-  }, [machineId]);
 
   const fetchDetail = useCallback(async () => {
     const r = await api.get(`/api/imm/equipment/${machineId}`);
@@ -130,11 +118,6 @@ export default function ImmEquipmentDetail() {
     }
   }, [fetchDetail, fetchKpiv, fetchDash]);
 
-  const pullFromNodeRed = useCallback(async () => {
-    await syncNodeRed();
-    await refresh();
-  }, [syncNodeRed, refresh]);
-
   const refreshLive = useCallback(async () => {
     await refresh();
   }, [refresh]);
@@ -154,24 +137,6 @@ export default function ImmEquipmentDetail() {
   const selectShift = (id) => {
     setRangeMode('shift');
     setShiftId(id);
-  };
-
-  const simulateOpcua = async () => {
-    try {
-      await api.post(`/api/imm/opcua/equipment/${machineId}/simulate`);
-      await refresh();
-    } catch (err) {
-      setMsg(err.response?.data?.detail || err.message || 'Simulate failed');
-    }
-  };
-
-  const pollOpcua = async () => {
-    try {
-      await api.post(`/api/imm/opcua/equipment/${machineId}/poll`);
-      await refresh();
-    } catch (err) {
-      setMsg(err.response?.data?.detail || err.message || 'OPC UA poll failed — set plc_endpoint or use ingest/simulate');
-    }
   };
 
   const machine = detail?.machine;
@@ -274,16 +239,6 @@ export default function ImmEquipmentDetail() {
         onRefresh={refreshLive}
         extra={(
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            {noderedSync?.ok && (
-              <span style={{ fontSize: 11, color: t.textMuted }}>
-                Node-RED · {noderedSync.accepted ?? 0} params
-              </span>
-            )}
-            {noderedSync?.ok === false && noderedSync?.error && (
-              <span style={{ fontSize: 11, color: '#fca5a5' }} title={noderedSync.error}>
-                Node-RED sync pending
-              </span>
-            )}
             <span style={{ fontSize: 11, color: t.textDim, fontWeight: 700 }}>Range</span>
             {TIME_PRESETS.map((p) => (
               <button
@@ -422,13 +377,6 @@ export default function ImmEquipmentDetail() {
                     </div>
                   </div>
                 ))}
-              </div>
-            )}
-            {canEdit && (
-              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                <button type="button" style={s.ghostBtn} onClick={pullFromNodeRed}>Sync Node-RED</button>
-                <button type="button" style={s.ghostBtn} onClick={pollOpcua}>Poll OPC UA</button>
-                <button type="button" style={s.ghostBtn} onClick={simulateOpcua}>Load demo OPC UA</button>
               </div>
             )}
           </section>
@@ -604,7 +552,7 @@ export default function ImmEquipmentDetail() {
               {filteredOpcua.length === 0 ? (
                 <tr>
                   <td colSpan={6} style={{ padding: 16, color: t.textFaint, textAlign: 'center' }}>
-                    No OPC UA values yet — use Poll OPC UA, Load demo OPC UA, or POST /api/imm/opcua/equipment/{'{id}'}/ingest
+                    No live OPC UA values yet — waiting for Node-RED / SIE push data
                   </td>
                 </tr>
               ) : filteredOpcua.map((p) => (
@@ -632,7 +580,9 @@ export default function ImmEquipmentDetail() {
       <section className={surfaceClass(t)} style={{ ...s.card, marginTop: 14 }}>
         <h3 style={s.cardTitle}>Key Component Runtime</h3>
         <div style={s.compGrid}>
-          {components.map((c) => (
+          {(components || [])
+            .filter((c, idx, arr) => arr.findIndex((x) => x.component_type === c.component_type) === idx)
+            .map((c) => (
             <div key={c.id} style={s.compCard}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                     <strong style={{ color: t.text }}>{stripCjk(c.label)}</strong>
