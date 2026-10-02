@@ -45,6 +45,68 @@ def refresh_tool_status(tool: ToolStock) -> str:
     return tool.tool_status or "ok"
 
 
+def parse_cavities(raw) -> list:
+    """Normalize cavities_json into [{id,name,enabled,part_no}, ...]."""
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, list):
+        data = raw
+    else:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for i, row in enumerate(data):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        cid = str(row.get("id") or f"c{i + 1}")
+        out.append({
+            "id": cid,
+            "name": name,
+            "enabled": bool(row.get("enabled")),
+            "part_no": str(row.get("part_no") or "").strip() or None,
+        })
+    return out
+
+
+def dump_cavities(cavities) -> Optional[str]:
+    rows = parse_cavities(cavities if isinstance(cavities, list) else (cavities or []))
+    if not rows:
+        return None
+    # Exactly one cavity may be active for production logging
+    enabled_idxs = [i for i, r in enumerate(rows) if r.get("enabled")]
+    if not enabled_idxs:
+        rows[0]["enabled"] = True
+    elif len(enabled_idxs) > 1:
+        keep = enabled_idxs[0]
+        for i, r in enumerate(rows):
+            r["enabled"] = i == keep
+    return json.dumps(rows)
+
+
+def active_cavity(tool: ToolStock) -> Optional[dict]:
+    cavities = parse_cavities(getattr(tool, "cavities_json", None))
+    enabled = [c for c in cavities if c.get("enabled")]
+    if enabled:
+        return enabled[0]
+    return cavities[0] if cavities else None
+
+
+def effective_part_no(tool: ToolStock) -> Optional[str]:
+    """Part number used for production logging — active cavity overrides mold-level part_no."""
+    cav = active_cavity(tool)
+    if cav and cav.get("part_no"):
+        return cav["part_no"]
+    pn = getattr(tool, "part_no", None)
+    return (str(pn).strip() or None) if pn else None
+
+
 def serialize_tool(tool: ToolStock) -> dict:
     stock = float(tool.stock_qty or 0)
     min_s = float(tool.min_stock or 0)
@@ -54,10 +116,14 @@ def serialize_tool(tool: ToolStock) -> dict:
     warn = tool.life_warning_pct if tool.life_warning_pct is not None else 90
     cycles_remaining = (limit - used) if limit else None
     status = refresh_tool_status(tool)
+    cavities = parse_cavities(getattr(tool, "cavities_json", None))
+    active = active_cavity(tool)
+    eff_part = effective_part_no(tool)
     return {
         "id": tool.id,
         "tool_code": tool.tool_code,
         "tool_name": tool.tool_name,
+        "mold_name": tool.tool_name,
         "unit": tool.unit or "pcs",
         "stock_qty": stock,
         "min_stock": min_s,
@@ -75,6 +141,21 @@ def serialize_tool(tool: ToolStock) -> dict:
         "qr_code": tool.qr_code,
         "qr_scan_enabled": QR_SCAN_ENABLED,
         "notes": tool.notes,
+        "part_no": getattr(tool, "part_no", None),
+        "effective_part_no": eff_part,
+        "standard_cavity": getattr(tool, "standard_cavity", None),
+        "running_cavity": getattr(tool, "running_cavity", None),
+        "customer_name": getattr(tool, "customer_name", None),
+        "rm_grade": getattr(tool, "rm_grade", None),
+        "standard_cycle_time": float(tool.standard_cycle_time) if getattr(tool, "standard_cycle_time", None) is not None else None,
+        "std_shot_weight": float(tool.std_shot_weight) if getattr(tool, "std_shot_weight", None) is not None else None,
+        "std_part_weight": float(tool.std_part_weight) if getattr(tool, "std_part_weight", None) is not None else None,
+        "std_runner_weight": float(tool.std_runner_weight) if getattr(tool, "std_runner_weight", None) is not None else None,
+        "colour": getattr(tool, "colour", None),
+        "target_per_shift": getattr(tool, "target_per_shift", None),
+        "cavities": cavities,
+        "active_cavity": active,
+        "active_cavity_name": (active or {}).get("name") if active else None,
         "active": tool.active,
         "created_at": tool.created_at,
         "updated_at": tool.updated_at,
@@ -371,6 +452,18 @@ def apply_consumption_safe(
         tool = find_tool(db, tool_code=(row.get("tool_no") or None), tool_name=(row.get("name") or None))
         if not tool:
             continue
+        cavities = parse_cavities(getattr(tool, "cavities_json", None))
+        # Multi-fixture mold: production logs only against the enabled cavity
+        if cavities and not any(c.get("enabled") for c in cavities):
+            results.append({
+                "skipped": True,
+                "tool_id": tool.id,
+                "reason": "No active cavity selected — enable a cavity name to log production",
+            })
+            continue
+        cav = active_cavity(tool)
+        cav_name = (cav or {}).get("name") if cav else None
+        cav_part = effective_part_no(tool)
         cpp = float(tool.cycles_per_part or 1)
         add = delta * cpp
         before = float(tool.cycles_used or 0)
@@ -378,6 +471,8 @@ def apply_consumption_safe(
         tool.cycles_used = after
         tool.updated_at = now_ist()
         refresh_tool_status(tool)
+        cav_label = f" · cavity {cav_name}" if cav_name else ""
+        part_label = f" · part {cav_part}" if cav_part else ""
         log_event(
             db, tool, "consumed",
             user_id=user_id,
@@ -387,9 +482,17 @@ def apply_consumption_safe(
             plan_id=plan.id,
             part_id=wo.part_id,
             machine_id=plan.machine_id,
-            location=location,
-            notes=f"Consumed {add:.0f} cycles from plan actual (+{delta} pcs)",
+            location=f"{location}{cav_label}{part_label}",
+            notes=(
+                f"Consumed {add:.0f} cycles from plan actual (+{delta} pcs)"
+                f"{cav_label}{part_label}"
+            ),
         )
+        # Keep plan model_variant aligned with active cavity part when empty/placeholder
+        if cav_part and plan is not None:
+            mv = (getattr(plan, "model_variant", None) or "").strip()
+            if not mv or mv in ("00", "-", "—"):
+                plan.model_variant = cav_part
         evaluate_stock_and_life_alerts(db, tool)
         results.append(serialize_tool(tool))
     return results

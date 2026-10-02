@@ -15,11 +15,23 @@ import { useConfig, getCurrentShift } from '../context/ConfigContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
 
 const TIME_PRESETS = [
-  { label: '30 min', hours: 0.5 },
-  { label: '1 hour', hours: 1 },
-  { label: '6 hours', hours: 6 },
-  { label: '24 hours', hours: 24 },
+  { label: '30 min', hours: 0.5, value: '0.5' },
+  { label: '1 hour', hours: 1, value: '1' },
+  { label: '6 hours', hours: 6, value: '6' },
+  { label: '24 hours', hours: 24, value: '24' },
+  { label: 'Custom range', hours: null, value: 'custom' },
 ];
+
+const toLocalInputValue = (d) => {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+const defaultCustomRange = () => {
+  const end = new Date();
+  const start = new Date(end.getTime() - 60 * 60 * 1000);
+  return { start: toLocalInputValue(start), end: toLocalInputValue(end) };
+};
 
 const CHART_TAGS = [
   { tag: 'injection_end', title: 'Injection End Point' },
@@ -51,9 +63,13 @@ export default function ImmEquipmentDetail() {
 
   const [detail, setDetail] = useState(null);
   const [kpiv, setKpiv] = useState({});
-  /** 'hours' | 'shift' — which range control drives KPIV fetch */
+  /** 'hours' | 'shift' | 'custom' — which range control drives KPIV fetch */
   const [rangeMode, setRangeMode] = useState('hours');
   const [hours, setHours] = useState(1);
+  const [rangeSelect, setRangeSelect] = useState('1');
+  const [customStart, setCustomStart] = useState(() => defaultCustomRange().start);
+  const [customEnd, setCustomEnd] = useState(() => defaultCustomRange().end);
+  const [appliedCustom, setAppliedCustom] = useState(() => defaultCustomRange());
   const [shiftId, setShiftId] = useState(null);
   const [tempTab, setTempTab] = useState('nozzle_temp');
   const [fullscreen, setFullscreen] = useState(null);
@@ -61,7 +77,6 @@ export default function ImmEquipmentDetail() {
   const [showMoldList, setShowMoldList] = useState(false);
   const [modals, setModals] = useState({});
   const [msg, setMsg] = useState('');
-  const [opcuaCategory, setOpcuaCategory] = useState('all');
   const [siblings, setSiblings] = useState([]);
   const [dashSummary, setDashSummary] = useState(null);
   const [zoneMeta, setZoneMeta] = useState([]);
@@ -82,6 +97,10 @@ export default function ImmEquipmentDetail() {
       const params = {};
       if (rangeMode === 'shift' && shiftId) {
         params.shift = shiftId;
+      } else if (rangeMode === 'custom') {
+        if (!appliedCustom.start || !appliedCustom.end) return;
+        params.since = new Date(appliedCustom.start).toISOString();
+        params.until = new Date(appliedCustom.end).toISOString();
       } else {
         params.hours = hours;
       }
@@ -93,7 +112,7 @@ export default function ImmEquipmentDetail() {
     } finally {
       setKpivLoading(false);
     }
-  }, [machineId, hours, rangeMode, shiftId]);
+  }, [machineId, hours, rangeMode, shiftId, appliedCustom]);
 
   const fetchDash = useCallback(async () => {
     try {
@@ -132,6 +151,7 @@ export default function ImmEquipmentDetail() {
   const selectHours = (h) => {
     setRangeMode('hours');
     setHours(h);
+    setRangeSelect(String(h));
   };
 
   const selectShift = (id) => {
@@ -139,25 +159,142 @@ export default function ImmEquipmentDetail() {
     setShiftId(id);
   };
 
+  const onRangeSelectChange = (value) => {
+    setRangeSelect(value);
+    if (value === 'custom') {
+      const def = defaultCustomRange();
+      setCustomStart(def.start);
+      setCustomEnd(def.end);
+      setAppliedCustom(def);
+      setRangeMode('custom');
+      return;
+    }
+    const preset = TIME_PRESETS.find((p) => p.value === value);
+    if (preset?.hours != null) {
+      setRangeMode('hours');
+      setHours(preset.hours);
+    }
+  };
+
+  const applyCustomRange = () => {
+    if (!customStart || !customEnd) {
+      setMsg('Select both start and end for custom range');
+      return;
+    }
+    if (new Date(customStart) >= new Date(customEnd)) {
+      setMsg('Custom range start must be before end');
+      return;
+    }
+    setMsg('');
+    setAppliedCustom({ start: customStart, end: customEnd });
+    setRangeMode('custom');
+    setRangeSelect('custom');
+  };
+
   const machine = detail?.machine;
   const mold = detail?.active_mold;
   const components = detail?.components || [];
   const opcuaParams = detail?.opcua?.parameters || [];
   const opcuaHighlights = detail?.opcua?.highlights || {};
-  const opcuaCategories = useMemo(() => {
-    const set = new Set(opcuaParams.map((p) => p.category).filter(Boolean));
-    return ['all', ...Array.from(set).sort()];
-  }, [opcuaParams]);
-  const filteredOpcua = useMemo(() => {
-    if (opcuaCategory === 'all') return opcuaParams;
-    return opcuaParams.filter((p) => p.category === opcuaCategory);
-  }, [opcuaParams, opcuaCategory]);
+  const opcuaByKey = useMemo(() => {
+    const map = { ...opcuaHighlights };
+    opcuaParams.forEach((p) => {
+      if (!p?.param_key) return;
+      if (!map[p.param_key]) map[p.param_key] = p;
+    });
+    return map;
+  }, [opcuaHighlights, opcuaParams]);
+  const pv = useCallback((key) => {
+    const row = opcuaByKey[key];
+    if (!row) return null;
+    const v = row.value_text ?? row.value_num;
+    return v == null || v === '' ? null : v;
+  }, [opcuaByKey]);
+  const fmt = useCallback((key, unit = '') => {
+    const v = pv(key);
+    if (v == null) return '—';
+    const n = Number(v);
+    const text = Number.isFinite(n)
+      ? n.toLocaleString('en-US', { maximumFractionDigits: 3 })
+      : stripCjk(String(v));
+    return unit ? `${text} ${unit}` : text;
+  }, [pv]);
+  const isOn = useCallback((key) => {
+    const v = String(pv(key) ?? '').trim().toLowerCase();
+    return v === '1' || v === 'true' || v === 'on' || v === 'yes' || v === 'running';
+  }, [pv]);
   const molds = useMemo(() => {
     const list = detail?.molds || [];
     if (!moldSearch.trim()) return list;
     const q = moldSearch.toLowerCase();
     return list.filter((m) => (m.mold_no || '').toLowerCase().includes(q));
   }, [detail, moldSearch]);
+
+  const overviewHeader = useMemo(() => ({
+    mold: stripCjk(pv('Actual_Mold_Name') || mold?.mold_no || mold?.master?.mold_name || '—'),
+    material: stripCjk(pv('Actual_Material_Name') || mold?.master?.rm_grade || '—'),
+    cavity: stripCjk(pv('Actual_Cavity_No') || mold?.master?.running_cavity || mold?.master?.active_cavity_name || '—'),
+  }), [pv, mold]);
+
+  const modeFlags = useMemo(() => ([
+    { key: 'Auto_Mode', label: 'Auto Mode', on: isOn('Auto_Mode') },
+    { key: 'Semi_Mode', label: 'Semi Mode', on: isOn('Semi_Mode') },
+    { key: 'Manual_Mode', label: 'Manual Mode', on: isOn('Manual_Mode') },
+    { key: 'Robot_Running_Status', label: 'Robot Status', on: isOn('Robot_Running_Status') },
+  ]), [isOn]);
+
+  const prodCounts = useMemo(() => ([
+    { label: 'Prod Target Count', value: fmt('Production_Target_Count', 'Nos.') },
+    { label: 'Act Prod Count', value: fmt('Actual_Production_Count', 'Nos.') },
+    { label: 'Good Count', value: fmt('Total_Good_Count', 'Nos.') },
+    { label: 'Bad Count', value: fmt('Total_Bad_Count', 'Nos.') },
+  ]), [fmt]);
+
+  const setActualRows = useMemo(() => ([
+    { setLabel: 'Last Cycle Time', setKey: 'Last_Cycle_Time', actLabel: 'Act. Cycle Time', actKey: 'Actual_Cycle_Time', unit: 'Sec' },
+    { setLabel: 'Set Nozzle Temp', setKey: 'Set_Nozzle_Temp', actLabel: 'Act Nozzle Temp', actKey: 'Actual_Nozzle_Temp', unit: '°C' },
+    { setLabel: 'Set Cyl. 1 Temp.', setKey: 'Set_Cylender_1_Temp', actLabel: 'Act Cyl. 1 Temp.', actKey: 'Actual_Cylender_1_Temp', unit: '°C' },
+    { setLabel: 'Set Cyl. 2 Temp.', setKey: 'Set_Cylender_2_Temp', actLabel: 'Act Cyl. 2 Temp.', actKey: 'Actual_Cylender_2_Temp', unit: '°C' },
+    { setLabel: 'Set Cyl. 3 Temp.', setKey: 'Set_Cylender_3_Temp', actLabel: 'Act Cyl. 3 Temp.', actKey: 'Actual_Cylender_3_Temp', unit: '°C' },
+    { setLabel: 'Set Cooling Time', setKey: 'Set_Cooling_Time', actLabel: 'Act Cooling Time', actKey: 'Actual_Cooling_Time', unit: 'Sec' },
+    { setLabel: 'Set Injection Time', setKey: 'Set_Injection_Time', actLabel: 'Act Injection Time', actKey: 'Actual_Injection_Time', unit: 'Sec' },
+    { setLabel: 'Set Clamp. Force', setKey: 'Set_Clamping_Force', actLabel: 'Act Clamp. Force', actKey: 'Actual_Clamping_Force', unit: 'Bar' },
+  ]), []);
+
+  const paramPairs = useMemo(() => ([
+    [
+      { label: 'Motor Status', key: 'Motor_Status', unit: '' },
+      { label: 'Heater Status', key: 'Heater_Status', unit: '' },
+    ],
+    [
+      { label: 'Act Charg. RPM', key: 'Actual_Charging_RPM', unit: 'RPM' },
+      { label: 'Oil Temperature', key: 'Actual_Machine_Oil_Temp', unit: '°C' },
+    ],
+    [
+      { label: 'Mould Open Time', key: 'Actual_Mold_Open_Time', unit: 'Sec' },
+      { label: 'Mould Close Time', key: 'Actual_Mold_Close_Time', unit: 'Sec' },
+    ],
+    [
+      { label: 'Act Eje Mode', key: 'Actual_Ejector_Mode', unit: '' },
+      { label: 'Act Eje Position', key: 'Actual_Ejector_Position', unit: 'mm' },
+    ],
+    [
+      { label: 'Act Charg. Pos.', key: 'Actual_Charging_Position', unit: 'mm' },
+      { label: 'Act Charge Time', key: 'Actual_Charging_Time', unit: 'Sec' },
+    ],
+    [
+      { label: 'Act Back Press.', key: 'Actual_Back_Pressure', unit: 'Bar' },
+      { label: 'Act System Pres.', key: 'Actual_System_Pressure', unit: 'Bar' },
+    ],
+    [
+      { label: 'Act System Flow', key: 'Actual_System_Flow', unit: '' },
+      { label: 'Lubrication Status', key: 'Auto_Lubrication_Status', unit: '' },
+    ],
+    [
+      { label: 'Set Hold Tran. Pos.', key: 'Set_Holding_Transfer_Position', unit: 'mm' },
+      { label: 'Inj Cushion Mon.Pos', key: 'Actual_Injection_Cusion_Monitoring_Position', unit: 'mm' },
+    ],
+  ]), []);
 
   const s = styles(t);
 
@@ -240,41 +377,69 @@ export default function ImmEquipmentDetail() {
         extra={(
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <span style={{ fontSize: 11, color: t.textDim, fontWeight: 700 }}>Range</span>
-            {TIME_PRESETS.map((p) => (
-              <button
-                key={p.hours}
-                type="button"
-                style={{
-                  ...s.chip,
-                  ...(rangeMode === 'hours' && hours === p.hours ? s.chipActive : {}),
-                }}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  selectHours(p.hours);
-                }}
-              >{p.label}</button>
-            ))}
+            <select
+              value={rangeSelect}
+              onChange={(e) => onRangeSelectChange(e.target.value)}
+              style={s.rangeSelect}
+              title="KPIV chart time range"
+            >
+              {TIME_PRESETS.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
+            </select>
+            {rangeSelect === 'custom' && (
+              <>
+                <input
+                  type="datetime-local"
+                  value={customStart}
+                  onChange={(e) => setCustomStart(e.target.value)}
+                  style={s.rangeInput}
+                  title="Start"
+                />
+                <span style={{ fontSize: 11, color: t.textMuted }}>to</span>
+                <input
+                  type="datetime-local"
+                  value={customEnd}
+                  onChange={(e) => setCustomEnd(e.target.value)}
+                  style={s.rangeInput}
+                  title="End"
+                />
+                <button type="button" style={s.chipActiveBtn} onClick={applyCustomRange}>
+                  Apply
+                </button>
+              </>
+            )}
             {enabledShifts.length > 0 && (
               <>
                 <span style={{ width: 1, height: 18, background: t.border, margin: '0 2px' }} />
                 <span style={{ fontSize: 11, color: t.textDim, fontWeight: 700 }}>Shift</span>
-                {enabledShifts.map((sh) => (
-                  <button
-                    key={sh.id}
-                    type="button"
-                    style={{
-                      ...s.chip,
-                      ...(rangeMode === 'shift' && shiftId === sh.id ? s.chipActive : {}),
-                    }}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      selectShift(sh.id);
-                    }}
-                    title={`${sh.start || ''}–${sh.end || ''}`}
-                  >{sh.name || `Shift ${sh.id}`}</button>
-                ))}
+                <select
+                  value={rangeMode === 'shift' && shiftId != null ? String(shiftId) : ''}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (!v) {
+                      // Clear shift filter → fall back to selected range preset
+                      if (rangeSelect === 'custom') {
+                        setRangeMode('custom');
+                      } else {
+                        const preset = TIME_PRESETS.find((p) => p.value === rangeSelect);
+                        setRangeMode('hours');
+                        if (preset?.hours != null) setHours(preset.hours);
+                      }
+                      return;
+                    }
+                    selectShift(v);
+                  }}
+                  style={s.rangeSelect}
+                  title="KPIV chart by shift window"
+                >
+                  <option value="">—</option>
+                  {enabledShifts.map((sh) => (
+                    <option key={sh.id} value={String(sh.id)}>
+                      {sh.name || `Shift ${sh.id}`}{sh.start || sh.end ? ` (${sh.start || ''}-${sh.end || ''})` : ''}
+                    </option>
+                  ))}
+                </select>
               </>
             )}
             {kpivLoading && (
@@ -407,6 +572,20 @@ export default function ImmEquipmentDetail() {
                     <Row label="Mold No." value={stripCjk(mold.mold_no)} onEdit={canEdit ? () => openModal('editMold', { field: 'mold_no', value: mold.mold_no, moldId: mold.id }) : null} t={t} />
                     <Row label="Uses" value={mold.usage_count} onEdit={canEdit ? () => openModal('editMold', { field: 'usage_count', value: mold.usage_count, moldId: mold.id }) : null} t={t} />
                     <Row label="Max mold" value={mold.usage_max} onEdit={canEdit ? () => openModal('editMold', { field: 'usage_max', value: mold.usage_max, moldId: mold.id }) : null} t={t} />
+                    {mold.master && (
+                      <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${t.border}` }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: t.textMuted, marginBottom: 6 }}>Mold Master</div>
+                        <Row label="Customer" value={mold.master.customer_name || '—'} t={t} />
+                        <Row label="Part No." value={mold.master.part_no || '—'} t={t} />
+                        <Row label="RM Grade" value={mold.master.rm_grade || '—'} t={t} />
+                        <Row label="Colour" value={mold.master.colour || '—'} t={t} />
+                        <Row label="Std / Run Cav" value={`${mold.master.standard_cavity ?? '—'} / ${mold.master.running_cavity ?? '—'}`} t={t} />
+                        <Row label="Cycle Time" value={mold.master.standard_cycle_time != null ? `${mold.master.standard_cycle_time} s` : '—'} t={t} />
+                        <Row label="Shot / Part / Runner" value={`${mold.master.std_shot_weight ?? '—'} / ${mold.master.std_part_weight ?? '—'} / ${mold.master.std_runner_weight ?? '—'} g`} t={t} />
+                        <Row label="Target / Shift" value={mold.master.target_per_shift ?? '—'} t={t} />
+                        <Row label="Active Cavity" value={mold.master.active_cavity_name || '—'} t={t} />
+                      </div>
+                    )}
                     <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
                       {canEdit && (
                         <>
@@ -477,17 +656,22 @@ export default function ImmEquipmentDetail() {
             <span style={{ fontSize: 11, color: t.textMuted }}>
               {rangeMode === 'shift'
                 ? `Shift ${(enabledShifts.find((x) => x.id === shiftId)?.name) || shiftId || '—'}`
-                : `Last ${TIME_PRESETS.find((p) => p.hours === hours)?.label || `${hours}h`}`}
+                : rangeMode === 'custom'
+                  ? `${appliedCustom.start?.replace('T', ' ') || '—'} → ${appliedCustom.end?.replace('T', ' ') || '—'}`
+                  : `Last ${TIME_PRESETS.find((p) => p.hours === hours)?.label || `${hours}h`}`}
             </span>
           </div>
           <div style={s.chartGrid} className="imm-kpiv-grid">
             {CHART_TAGS.map((cfg) => {
               const activeTag = cfg.tabs ? tempTab : cfg.tag;
               const series = kpiv[activeTag];
-              const chartData = (series?.points || []).map((p) => ({
-                t: (p.t || '').slice(11, 16),
-                v: p.v,
-              }));
+              const chartData = (series?.points || []).map((p) => {
+                const raw = p.t || '';
+                const label = rangeMode === 'custom' && raw.length >= 16
+                  ? `${raw.slice(5, 10)} ${raw.slice(11, 16)}`
+                  : raw.slice(11, 16);
+                return { t: label, v: p.v };
+              });
               const thr = series?.threshold;
               return (
                 <div key={cfg.title} style={s.chartCard}>
@@ -524,53 +708,79 @@ export default function ImmEquipmentDetail() {
         </section>
       </div>
 
-      {/* Dia Edge OPC UA parameters */}
-      <section className={surfaceClass(t)} style={{ ...s.card, marginTop: 14 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <h3 style={{ ...s.cardTitle, margin: 0 }}>OPC UA Parameters (Dia Edge)</h3>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {opcuaCategories.map((c) => (
-              <button
-                key={c}
-                type="button"
-                style={{ ...s.chip, ...(opcuaCategory === c ? s.chipActive : {}) }}
-                onClick={() => setOpcuaCategory(c)}
-              >{c}</button>
-            ))}
+      {/* Machine overview — HMI-style tabulated panel (no energy meter rows) */}
+      <section className={surfaceClass(t)} style={{ ...s.card, marginTop: 14, padding: 0, overflow: 'hidden' }}>
+        <div style={s.overviewTitleBar}>
+          <h3 style={{ ...s.cardTitle, margin: 0, padding: '12px 16px' }}>Machine Overview</h3>
+        </div>
+
+        <div style={s.hmiHeaderRow}>
+          <div style={s.hmiHeaderCell}>
+            <span style={s.hmiLabel}>Mould Name</span>
+            <span style={s.hmiValue}>{overviewHeader.mold}</span>
+          </div>
+          <div style={s.hmiHeaderCell}>
+            <span style={s.hmiLabel}>Material Name</span>
+            <span style={s.hmiValue}>{overviewHeader.material}</span>
+          </div>
+          <div style={s.hmiHeaderCell}>
+            <span style={s.hmiLabel}>Run Cavity</span>
+            <span style={s.hmiValue}>{overviewHeader.cavity}</span>
           </div>
         </div>
-        <div style={{ overflowX: 'auto', marginTop: 10 }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+
+        <div style={s.hmiModeRow}>
+          {modeFlags.map((m) => (
+            <div
+              key={m.key}
+              style={{
+                ...s.hmiModeCell,
+                background: m.on ? 'rgba(34,197,94,0.22)' : 'rgba(239,68,68,0.18)',
+                borderColor: m.on ? '#22c55e' : '#ef4444',
+                color: m.on ? '#86efac' : '#fca5a5',
+              }}
+            >
+              {m.label}
+            </div>
+          ))}
+        </div>
+
+        <div style={s.hmiProdRow}>
+          {prodCounts.map((c) => (
+            <div key={c.label} style={s.hmiProdCell}>
+              <span style={s.hmiLabel}>{c.label}</span>
+              <span style={s.hmiValue}>{c.value}</span>
+            </div>
+          ))}
+        </div>
+
+        <div style={s.hmiTableWrap}>
+          <table style={s.hmiTable}>
             <thead>
               <tr>
-                {['Parameter', 'Category', 'Tag / Node', 'Value', 'Quality', 'Updated'].map((h) => (
-                  <th key={h} style={{ textAlign: 'left', padding: '8px 6px', color: t.textMuted, borderBottom: `1px solid ${t.border}` }}>{h}</th>
-                ))}
+                <th style={s.hmiTh} colSpan={2}>Set</th>
+                <th style={s.hmiTh} colSpan={2}>Actual</th>
+                <th style={s.hmiTh} colSpan={4}>Parameters</th>
               </tr>
             </thead>
             <tbody>
-              {filteredOpcua.length === 0 ? (
-                <tr>
-                  <td colSpan={6} style={{ padding: 16, color: t.textFaint, textAlign: 'center' }}>
-                    No live OPC UA values yet — waiting for Node-RED / SIE push data
-                  </td>
-                </tr>
-              ) : filteredOpcua.map((p) => (
-                <tr key={p.param_key}>
-                  <td style={{ padding: '8px 6px', borderBottom: `1px solid ${t.border}`, color: t.text }}>{stripCjk(p.param_key)}</td>
-                  <td style={{ padding: '8px 6px', borderBottom: `1px solid ${t.border}`, color: t.textDim }}>{p.category}</td>
-                  <td style={{ padding: '8px 6px', borderBottom: `1px solid ${t.border}`, color: t.textDim }}>
-                    {stripCjk(p.opcua_tag_name || '—')}{p.opcua_node_id ? ` / ${p.opcua_node_id}` : ''}
-                  </td>
-                  <td style={{ padding: '8px 6px', borderBottom: `1px solid ${t.border}`, color: t.accent, fontWeight: 700 }}>
-                    {p.value_text ?? p.value_num ?? '—'}
-                  </td>
-                  <td style={{ padding: '8px 6px', borderBottom: `1px solid ${t.border}`, color: t.textDim }}>{p.quality || '—'}</td>
-                  <td style={{ padding: '8px 6px', borderBottom: `1px solid ${t.border}`, color: t.textFaint }}>
-                    {p.recorded_at ? new Date(p.recorded_at).toLocaleString() : '—'}
-                  </td>
-                </tr>
-              ))}
+              {setActualRows.map((row, idx) => {
+                const left = paramPairs[idx]?.[0];
+                const right = paramPairs[idx]?.[1];
+                const zebra = idx % 2 === 0 ? s.hmiRowEven : s.hmiRowOdd;
+                return (
+                  <tr key={row.actKey} style={zebra}>
+                    <td style={s.hmiTdLabel}>{row.setLabel}</td>
+                    <td style={s.hmiTdValue}>{fmt(row.setKey, row.unit)}</td>
+                    <td style={s.hmiTdLabel}>{row.actLabel}</td>
+                    <td style={s.hmiTdValue}>{fmt(row.actKey, row.unit)}</td>
+                    <td style={s.hmiTdLabel}>{left?.label || ''}</td>
+                    <td style={s.hmiTdValue}>{left ? fmt(left.key, left.unit) : ''}</td>
+                    <td style={s.hmiTdLabel}>{right?.label || ''}</td>
+                    <td style={s.hmiTdValue}>{right ? fmt(right.key, right.unit) : ''}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -639,7 +849,11 @@ export default function ImmEquipmentDetail() {
                 <div key={m.id} style={s.moldListRow}>
                   <div>
                     <div style={{ color: t.text, fontWeight: 700 }}>{stripCjk(m.mold_no)}</div>
-                    <div style={{ color: t.textMuted, fontSize: 12 }}>{m.usage_count}/{m.usage_max}</div>
+                    <div style={{ color: t.textMuted, fontSize: 12 }}>
+                      {m.usage_count}/{m.usage_max}
+                      {m.master?.customer_name ? ` · ${m.master.customer_name}` : ''}
+                      {m.master?.active_cavity_name ? ` · cav ${m.master.active_cavity_name}` : ''}
+                    </div>
                   </div>
                   <button type="button" style={s.primaryBtn} disabled={m.is_active}
                     onClick={() => changeMold(m.id)}>{m.is_active ? 'Active' : 'Select'}</button>
@@ -849,6 +1063,87 @@ function styles(t) {
       height: '100%',
     },
     cardTitle: { margin: '0 0 12px', color: t.labelColor || t.accent, fontSize: 14, fontWeight: 700, letterSpacing: 0.3 },
+    overviewTitleBar: {
+      borderBottom: `1px solid ${t.border}`,
+      background: t.surface2 || t.bg,
+    },
+    hmiHeaderRow: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(3, 1fr)',
+      borderBottom: `1px solid ${t.border}`,
+    },
+    hmiHeaderCell: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: 10,
+      padding: '10px 14px',
+      borderRight: `1px solid ${t.border}`,
+    },
+    hmiModeRow: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, 1fr)',
+      gap: 0,
+      borderBottom: `1px solid ${t.border}`,
+    },
+    hmiModeCell: {
+      textAlign: 'center',
+      fontWeight: 800,
+      fontSize: 13,
+      padding: '12px 8px',
+      borderRight: `1px solid ${t.border}`,
+      borderBottom: '2px solid',
+    },
+    hmiProdRow: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, 1fr)',
+      borderBottom: `1px solid ${t.border}`,
+    },
+    hmiProdCell: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: 8,
+      padding: '10px 12px',
+      borderRight: `1px solid ${t.border}`,
+    },
+    hmiLabel: { color: t.labelColor || t.accent, fontWeight: 700, fontSize: 12 },
+    hmiValue: { color: t.text, fontWeight: 800, fontSize: 14, textAlign: 'right' },
+    hmiTableWrap: { overflowX: 'auto' },
+    hmiTable: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 12,
+      tableLayout: 'fixed',
+    },
+    hmiTh: {
+      textAlign: 'center',
+      padding: '8px 6px',
+      color: t.labelColor || t.accent,
+      fontWeight: 800,
+      borderBottom: `1px solid ${t.border}`,
+      borderRight: `1px solid ${t.border}`,
+      background: t.surface2 || t.bg,
+    },
+    hmiRowEven: { background: t.isDark === false || t.id === 'light' ? '#f8fafc' : 'rgba(15,23,42,0.35)' },
+    hmiRowOdd: { background: 'transparent' },
+    hmiTdLabel: {
+      padding: '8px 8px',
+      color: t.labelColor || t.accent,
+      fontWeight: 700,
+      borderBottom: `1px solid ${t.border}`,
+      borderRight: `1px solid ${t.border}`,
+      whiteSpace: 'nowrap',
+    },
+    hmiTdValue: {
+      padding: '8px 8px',
+      color: t.text,
+      fontWeight: 700,
+      textAlign: 'right',
+      borderBottom: `1px solid ${t.border}`,
+      borderRight: `1px solid ${t.border}`,
+      whiteSpace: 'nowrap',
+    },
     meta: { color: t.textMuted, fontSize: 13, marginTop: 4 },
     badge: { fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 999 },
     basicRow: { display: 'flex', gap: 14, alignItems: 'flex-start' },
@@ -920,6 +1215,19 @@ function styles(t) {
       borderRadius: 8, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
     },
     chipActive: { background: t.accent, color: '#fff', borderColor: t.accent },
+    chipActiveBtn: {
+      border: `1px solid ${t.accent}`, background: t.accent, color: '#fff',
+      borderRadius: 8, padding: '5px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 700,
+    },
+    rangeSelect: {
+      padding: '6px 10px', borderRadius: 8, border: `1px solid ${t.accent}`,
+      background: t.surface2 || t.bg, color: t.text, fontSize: 12, fontWeight: 600,
+      minWidth: 120, cursor: 'pointer',
+    },
+    rangeInput: {
+      padding: '5px 8px', borderRadius: 8, border: `1px solid ${t.border}`,
+      background: t.surface2 || t.bg, color: t.text, fontSize: 12,
+    },
     iconBtn: {
       border: `1px solid ${t.border}`, background: t.surface, color: t.textMuted,
       borderRadius: 6, width: 28, height: 28, cursor: 'pointer',

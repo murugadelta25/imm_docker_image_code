@@ -3,16 +3,16 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
-from ..models import ImmOpcuaLatest, Machine, Station, get_db, now_ist
+from ..models import ImmOpcuaLatest, Machine, ProductionPlan, Station, get_db, now_ist
 from ..opcua_imm import highlights_for_machine, eap_imm_status_from_opcua_highlights
 from .config import _load_config
-from .machines import _compute_status
+from .machines import _compute_status, _resolve_shift_at_ts
 from .imm_monitor import _check_kpiv_alerts, _map_imm_status, _map_kpiv_status
 
 router = APIRouter(prefix="/api/imm/dashboard", tags=["imm-dashboard"])
@@ -47,6 +47,37 @@ HOURLY_RUNNING_RATE_COLORS = [
 ]
 
 
+def _latest_opcua_param(db: Session, param_key: str):
+    return (
+        db.query(ImmOpcuaLatest)
+        .filter(ImmOpcuaLatest.param_key == param_key)
+        .order_by(ImmOpcuaLatest.recorded_at.desc())
+        .first()
+    )
+
+
+def _plant_energy_meter(db: Session) -> dict:
+    """Plant cumulative energy totals (SIE Total_* trx, or mapped Energy_Shift_* keys)."""
+    # Primary SIE field names; Node-RED maps these to Energy_Shift_* when ingesting.
+    totals = (
+        ("Total_Active_Energy", "Energy_Shift_Kwh"),
+        ("Total_Appearent_Energy", "Energy_Shift_Kvah"),
+        ("Total_Reactive_Energy", "Energy_Shift_Kvarh"),
+    )
+    out: Dict[str, Any] = {}
+    for api_key, fallback_key in totals:
+        row = _latest_opcua_param(db, api_key) or _latest_opcua_param(db, fallback_key)
+        if not row:
+            continue
+        out[api_key] = {
+            "value_num": row.value_num,
+            "value_text": row.value_text,
+            "machine_id": row.machine_id,
+            "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
+        }
+    return out
+
+
 def _load_factory_tree(db: Session) -> List[dict]:
     from ..factory_structure import factories_tree_from_db, migrate_json_factories_if_empty
 
@@ -56,6 +87,59 @@ def _load_factory_tree(db: Session) -> List[dict]:
     except Exception:
         db.rollback()
     return factories_tree_from_db(db)
+
+
+def _opcua_num(opcua: dict, key: str, default: float = 0.0) -> float:
+    v = opcua.get(key) or {}
+    if v.get("value_num") is not None:
+        try:
+            return float(v["value_num"])
+        except (TypeError, ValueError):
+            pass
+    text = v.get("value_text")
+    if text is None or text == "":
+        return default
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return default
+
+
+def _machine_tile_metrics(_db: Session, _machine_id: int, opcua: dict, imm_key: str) -> dict:
+    """Compact KPIs for zone/station machine cards."""
+    prod = _opcua_num(opcua, "Actual_Production_Count")
+    good = _opcua_num(opcua, "Total_Good_Count")
+    bad = _opcua_num(opcua, "Total_Bad_Count")
+    if prod <= 0 and (good > 0 or bad > 0):
+        prod = good + bad
+
+    # Quality rate; treat running machines with no scrap as 100% QR
+    if good + bad > 0:
+        qr = round(100.0 * good / (good + bad), 1)
+    elif prod > 0:
+        qr = 100.0
+    else:
+        qr = 0.0
+
+    # Lightweight OEE proxy when full OEE entry is unavailable
+    if imm_key == "production":
+        ar = 100.0
+    elif imm_key in ("available", "idle"):
+        ar = 50.0
+    else:
+        ar = 0.0
+    pr = 100.0 if prod > 0 or imm_key == "production" else 0.0
+    oee = round(ar * pr * qr / 10000.0, 1)
+
+    return {
+        "total_production": prod,
+        "total_good": good,
+        "total_bad": bad,
+        "downtime_min": None,
+        "last_hr_bad": None,
+        "oee": oee,
+        "qr": qr,
+    }
 
 
 def _machine_payload(m: Machine, db: Session, stations: Dict[int, Station]) -> dict:
@@ -71,6 +155,7 @@ def _machine_payload(m: Machine, db: Session, stations: Dict[int, Station]) -> d
         live = ticket_live
     imm = _map_imm_status(live, errs)
     kpiv_st = _map_kpiv_status(errs, live)
+    tile = _machine_tile_metrics(db, m.id, opcua, imm["key"])
     return {
         "id": m.id,
         "name": m.name,
@@ -80,6 +165,7 @@ def _machine_payload(m: Machine, db: Session, stations: Dict[int, Station]) -> d
         "make": m.make,
         "model_no": m.model_no,
         "location": m.location,
+        "image_url": getattr(m, "image_url", None),
         "eap_imm_status": live,
         "imm_status": imm["key"],
         "imm_status_label": imm["label"],
@@ -90,6 +176,7 @@ def _machine_payload(m: Machine, db: Session, stations: Dict[int, Station]) -> d
         "err_msgs": errs,
         "opcua": opcua,
         "operate_mode": _operate_mode(opcua),
+        "tile": tile,
     }
 
 
@@ -125,6 +212,7 @@ def _overview_status_counts(items: List[dict]) -> dict:
     c = Counter((x.get("eap_imm_status") or "offline") for x in items)
     return {
         "running": c.get("running", 0),
+        "available": c.get("available", 0),
         "idle": c.get("idle", 0),
         "stop": c.get("stop", 0),
         "breakdown": c.get("breakdown", 0),
@@ -139,12 +227,162 @@ def _overview_status_counts(items: List[dict]) -> dict:
 
 
 def _zone_achievement(zone_machines: List[dict], stock_in: int, finished: int, zone_idx: int) -> dict:
-    """Live achievement from OPC UA Good/Target counts only (no invented demo qty)."""
+    """Legacy OPC UA split (kept for fallback when no production plans)."""
     n = max(len(zone_machines), 1)
     planned = max(0, int(finished / n)) if finished else 0
     actual = max(0, int(stock_in / n)) if stock_in else 0
     pct = round(100.0 * actual / planned, 1) if planned else 0.0
-    return {"pct": pct, "actual": actual, "planned": planned}
+    return {"pct": pct, "actual": actual, "planned": planned, "has_plan": False}
+
+
+def _sum_production_plans(
+    db: Session,
+    plan_date,
+    shift_id: str,
+    machine_ids: Optional[List[int]] = None,
+) -> dict:
+    """Sum planned/actual for machines that have a non-cancelled plan on date+shift."""
+    q = db.query(ProductionPlan).filter(
+        ProductionPlan.plan_date == plan_date,
+        ProductionPlan.shift == str(shift_id),
+        ProductionPlan.machine_id.isnot(None),
+        ProductionPlan.status != "cancelled",
+        ProductionPlan.planned_qty > 0,
+    )
+    if machine_ids is not None:
+        if not machine_ids:
+            return {
+                "planned": 0,
+                "actual": 0,
+                "pct": None,
+                "has_plan": False,
+                "plan_count": 0,
+            }
+        q = q.filter(ProductionPlan.machine_id.in_(machine_ids))
+    plans = q.all()
+    if not plans:
+        return {
+            "planned": 0,
+            "actual": 0,
+            "pct": None,
+            "has_plan": False,
+            "plan_count": 0,
+        }
+    planned = sum(int(p.planned_qty or 0) for p in plans)
+    actual = sum(int(p.actual_qty or 0) for p in plans)
+    pct = round(100.0 * actual / planned, 1) if planned > 0 else None
+    return {
+        "planned": planned,
+        "actual": actual,
+        "pct": pct,
+        "has_plan": True,
+        "plan_count": len(plans),
+    }
+
+
+def _build_plan_achievement(db: Session, zone_rows: List[dict]) -> Tuple[dict, dict, Dict[str, dict]]:
+    """
+    Current-shift + today-by-shift plan achievement from ProductionPlan.
+    Returns (current_shift_payload, today_payload, zone_id -> {pct,actual,planned,has_plan}).
+    """
+    from datetime import date as date_cls
+
+    cfg = _load_config(db)
+    now = now_ist()
+    if getattr(now, "tzinfo", None) is not None:
+        now = now.replace(tzinfo=None)
+
+    shift_id, entry_date = _resolve_shift_at_ts(now, cfg)
+    enabled = [s for s in (cfg.get("shifts") or []) if s.get("enabled", True)]
+    if not enabled:
+        enabled = [
+            {"id": "A", "name": "Shift A", "start": "08:00", "end": "20:00", "enabled": True},
+            {"id": "B", "name": "Shift B", "start": "20:00", "end": "08:00", "enabled": True},
+        ]
+
+    # Keep plan.actual_qty in sync with status-log running parts
+    try:
+        from .hourly_output import sync_plan_actuals_from_status_logs
+
+        sync_plan_actuals_from_status_logs(
+            db,
+            date_from=entry_date - timedelta(days=1),
+            date_to=now.date(),
+            commit=True,
+        )
+    except Exception as exc:
+        print(f"[IMM Dashboard] plan actual sync skipped: {exc}")
+
+    active_meta = next((s for s in enabled if str(s.get("id")) == str(shift_id)), None)
+    if not active_meta:
+        active_meta = enabled[0]
+        shift_id = str(active_meta.get("id") or "A")
+
+    current = _sum_production_plans(db, entry_date, shift_id)
+    current_payload = {
+        "scope": "current_shift",
+        "shift_id": str(shift_id),
+        "shift_name": active_meta.get("name") or f"Shift {shift_id}",
+        "shift_start": active_meta.get("start") or "",
+        "shift_end": active_meta.get("end") or "",
+        "plan_date": entry_date.isoformat() if isinstance(entry_date, date_cls) else str(entry_date),
+        "has_plan": current["has_plan"],
+        "plan_count": current["plan_count"],
+        "planned": current["planned"],
+        "actual": current["actual"],
+        "pct": current["pct"] if current["has_plan"] else None,
+    }
+
+    # Calendar "today" — each enabled shift's plans for today's plan_date
+    today = now.date()
+    by_shift = []
+    day_planned = 0
+    day_actual = 0
+    any_plan = False
+    for sh in enabled:
+        sid = str(sh.get("id") or "")
+        row = _sum_production_plans(db, today, sid)
+        if row["has_plan"]:
+            any_plan = True
+            day_planned += row["planned"]
+            day_actual += row["actual"]
+        by_shift.append(
+            {
+                "id": sid,
+                "name": sh.get("name") or f"Shift {sid}",
+                "start": sh.get("start") or "",
+                "end": sh.get("end") or "",
+                "has_plan": row["has_plan"],
+                "plan_count": row["plan_count"],
+                "planned": row["planned"],
+                "actual": row["actual"],
+                "pct": row["pct"] if row["has_plan"] else None,
+            }
+        )
+
+    today_payload = {
+        "scope": "today",
+        "plan_date": today.isoformat(),
+        "has_plan": any_plan,
+        "planned": day_planned,
+        "actual": day_actual,
+        "pct": round(100.0 * day_actual / day_planned, 1) if day_planned > 0 else None,
+        "by_shift": by_shift,
+    }
+
+    # Zone breakdown for current shift (machines with plans only)
+    zone_ach: Dict[str, dict] = {}
+    for z in zone_rows:
+        mids = [int(m["id"]) for m in (z.get("machines") or []) if m.get("id") is not None]
+        row = _sum_production_plans(db, entry_date, shift_id, machine_ids=mids)
+        zone_ach[str(z["id"])] = {
+            "pct": row["pct"] if row["has_plan"] else 0.0,
+            "actual": row["actual"],
+            "planned": row["planned"],
+            "has_plan": row["has_plan"],
+        }
+
+    return current_payload, today_payload, zone_ach
 
 
 def _live_utilization(zones: List[dict], shift_name: str = "Shift A") -> dict:
@@ -239,6 +477,7 @@ def _factory_running_rate_trend(db: Session, zones: List[dict]) -> dict:
 def _status_counts(items: List[dict]) -> dict:
     counts = {
         "production": 0,
+        "available": 0,
         "warning": 0,
         "abnormal": 0,
         "idle": 0,
@@ -250,6 +489,8 @@ def _status_counts(items: List[dict]) -> dict:
         key = x.get("imm_status") or "offline"
         if key == "production":
             counts["production"] += 1
+        elif key == "available":
+            counts["available"] += 1
         elif key == "warning":
             counts["warning"] += 1
         elif key == "abnormal":
@@ -319,9 +560,24 @@ def _build_zones_from_config(factories: List[dict], stations: Dict[int, Station]
                             "name": (st.display_name or st.name) if st else f"Station {sid}",
                         }
                     )
+                raw_line_id = line.get("id")
+                if raw_line_id is None or str(raw_line_id).strip() == "":
+                    line_key = zone_name or f"zone-{len(zones) + 1}"
+                else:
+                    line_key = str(raw_line_id)
+                factory_key = str(factory.get("id") or factory.get("name") or "f")
+                # Namespaced id — line ids often repeat (0, 1, …) across factories
+                zone_id = f"{factory_key}:{line_key}"
+                existing = {z["id"] for z in zones}
+                if zone_id in existing:
+                    n = 2
+                    while f"{zone_id}-{n}" in existing:
+                        n += 1
+                    zone_id = f"{zone_id}-{n}"
+
                 zones.append(
                     {
-                        "id": str(line.get("id") or zone_name or f"zone-{len(zones)+1}"),
+                        "id": zone_id,
                         "name": zone_name,
                         "factory_id": factory.get("id"),
                         "factory_name": factory_name,
@@ -332,7 +588,7 @@ def _build_zones_from_config(factories: List[dict], stations: Dict[int, Station]
                         "stations": station_rows,
                         "lines": [
                             {
-                                "id": str(line.get("id") or zone_name),
+                                "id": line_key,
                                 "name": zone_name,
                                 "station_ids": station_ids,
                             }
@@ -357,8 +613,19 @@ def _factory_dashboard_data(db: Session) -> dict:
     bad = _opcua_sum(db, mids, "Total_Bad_Count")
     prod = _opcua_sum(db, mids, "Actual_Production_Count")
     target = _opcua_sum(db, mids, "Production_Target_Count")
-    finished = target if target > 0 else (good + bad if (good + bad) > 0 else prod)
-    stock_in = good if good > 0 else prod
+    g = float(good or 0.0)
+    b = float(bad or 0.0)
+    p = float(prod or 0.0)
+    t = float(target or 0.0)
+    # Controllers often publish unset target as ~1e8 — ignore absurd values
+    usable_target = t > 0 and t < 1_000_000 and not (max(g, p, g + b) > 0 and t > max(g, p, g + b) * 50)
+    if usable_target:
+        finished = t
+    elif p > 0:
+        finished = p
+    else:
+        finished = (g + b) if (g + b) > 0 else 0.0
+    stock_in = g if g > 0 else p
     transfer_pct = round(100.0 * stock_in / finished, 1) if finished else 0.0
 
     zone_rows = []
@@ -410,6 +677,7 @@ def _factory_dashboard_data(db: Session) -> dict:
                 "achievement_pct": ach["pct"],
                 "achievement_actual": ach["actual"],
                 "achievement_planned": ach["planned"],
+                "achievement_has_plan": False,
                 "uptime_min": util_row.get("uptime_min"),
                 "downtime_min": util_row.get("downtime_min"),
                 "mttr_min": util_row.get("mttr_min"),
@@ -427,11 +695,22 @@ def _factory_dashboard_data(db: Session) -> dict:
     factory_name = factory_list[0]["name"] if factory_list else ""
     site_label = factory_name
     overview_counts = _overview_status_counts(items)
-    achievement_rate = {
-        "pct": transfer_pct if transfer_pct > 0 else running_pct,
-        "actual": int(stock_in),
-        "planned": int(finished),
-    }
+
+    # Production-plan based achievement (current shift + today by enabled shifts)
+    achievement_rate, achievement_today, zone_plan_ach = _build_plan_achievement(db, zone_rows)
+    for z in zone_rows:
+        za = zone_plan_ach.get(str(z["id"])) or {}
+        if za.get("has_plan"):
+            z["achievement_pct"] = za.get("pct") or 0.0
+            z["achievement_actual"] = za.get("actual") or 0
+            z["achievement_planned"] = za.get("planned") or 0
+            z["achievement_has_plan"] = True
+        else:
+            z["achievement_pct"] = 0.0
+            z["achievement_actual"] = 0
+            z["achievement_planned"] = 0
+            z["achievement_has_plan"] = False
+
     cfg = _load_config(db)
     active_shift = _match_shift_at(cfg, now_ist())
     utilization = _live_utilization(zone_rows, shift_name=(active_shift or {}).get("name") or "Shift A")
@@ -456,8 +735,10 @@ def _factory_dashboard_data(db: Session) -> dict:
             "finished_goods": int(finished),
         },
         "achievement_rate": achievement_rate,
+        "achievement_today": achievement_today,
         "status_counts": overview_counts,
         "imm_status_counts": counts,
+        "energy_meter": _plant_energy_meter(db),
         "utilization": utilization,
         "zones": zone_rows,
         "machines": items,

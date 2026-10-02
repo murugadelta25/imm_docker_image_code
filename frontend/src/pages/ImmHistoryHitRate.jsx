@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
@@ -42,23 +42,22 @@ export default function ImmHistoryHitRate() {
   useEffect(() => { load(); }, [load]);
 
   const stations = data?.stations || [];
-  const equipment = (data?.equipment || []).filter((eq) => {
+  const series = useMemo(() => data?.series || [], [data]);
+  const equipment = (data?.equipment || []).filter(() => {
     if (!stationId) return true;
-    // station filter is soft — equipment list is zone-scoped already
     return true;
   });
 
   const doExport = () => {
-    const lines = ['equipment,day_shift,night_shift'];
+    const headers = ['equipment', ...series.map((s) => s.label || s.key)];
+    const lines = [headers.join(',')];
     for (const eq of equipment) {
-      lines.push(`${eq.name},${eq.day},${eq.night}`);
+      lines.push([eq.name, ...series.map((s) => eq[s.key] ?? '')].join(','));
     }
     exportCsv(`imm_hit_rate_${dateStr}.csv`, lines);
   };
 
   const sel = historySelectStyle(t);
-  const dayColor = '#3b82f6';
-  const nightColor = '#eab308';
 
   return (
     <div className={pageClass(t)} style={{ padding: 16 }}>
@@ -97,19 +96,20 @@ export default function ImmHistoryHitRate() {
           </h3>
           <div style={{ width: '100%', height: 320, minWidth: 0 }}>
             <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-              <BarChart data={equipment.map((eq) => ({
-                name: stripCjk(eq.name),
-                day: eq.day,
-                night: eq.night,
-              }))}>
+              <BarChart data={equipment.map((eq) => {
+                const row = { name: stripCjk(eq.name) };
+                for (const s of series) row[s.key] = eq[s.key];
+                return row;
+              })}>
                 <CartesianGrid stroke={t.border} strokeDasharray="3 3" opacity={0.35} />
                 <XAxis dataKey="name" stroke={t.textDim} tick={{ fill: t.textMuted, fontSize: 11 }} />
                 <YAxis domain={[0, 120]} stroke={t.textDim} tick={{ fill: t.textMuted, fontSize: 11 }}
                   label={{ value: 'Hit Rate (%)', angle: -90, position: 'insideLeft', fill: t.textMuted, fontSize: 11 }} />
                 <Tooltip contentStyle={{ background: t.surface, border: `1px solid ${t.border}`, color: t.text }} />
                 <Legend />
-                <Bar dataKey="day" name="Day Shift" fill={dayColor} radius={[3, 3, 0, 0]} />
-                <Bar dataKey="night" name="Night Shift" fill={nightColor} radius={[3, 3, 0, 0]} />
+                {series.map((s) => (
+                  <Bar key={s.key} dataKey={s.key} name={s.label} fill={s.color || '#3b82f6'} radius={[3, 3, 0, 0]} />
+                ))}
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -123,18 +123,19 @@ export default function ImmHistoryHitRate() {
           </h3>
           <div style={{ width: '100%', height: 320, minWidth: 0 }}>
             <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-              <BarChart data={(data?.periods || []).map((p) => ({
-                name: p.label,
-                day: p.day,
-                night: p.night,
-              }))}>
+              <BarChart data={(data?.periods || []).map((p) => {
+                const row = { name: p.label };
+                for (const s of series) row[s.key] = p[s.key];
+                return row;
+              })}>
                 <CartesianGrid stroke={t.border} strokeDasharray="3 3" opacity={0.35} />
                 <XAxis dataKey="name" stroke={t.textDim} tick={{ fill: t.textMuted, fontSize: 10 }} />
                 <YAxis domain={[0, 120]} stroke={t.textDim} tick={{ fill: t.textMuted, fontSize: 11 }} />
                 <Tooltip contentStyle={{ background: t.surface, border: `1px solid ${t.border}`, color: t.text }} />
                 <Legend />
-                <Bar dataKey="day" name="Day Shift" fill={dayColor} radius={[3, 3, 0, 0]} />
-                <Bar dataKey="night" name="Night Shift" fill={nightColor} radius={[3, 3, 0, 0]} />
+                {series.map((s) => (
+                  <Bar key={s.key} dataKey={s.key} name={s.label} fill={s.color || '#3b82f6'} radius={[3, 3, 0, 0]} />
+                ))}
               </BarChart>
             </ResponsiveContainer>
           </div>

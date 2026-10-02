@@ -1,10 +1,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// LAN access: allow din.eappms, IP addresses, and any host on the factory network.
+// LAN access: bind IPv4 explicitly so other PCs can reach http://<ipc-ip>:5184
 const sharedServer = {
-  host: true,
+  host: '0.0.0.0',
   port: 5184,
+  strictPort: true,
   allowedHosts: true,
   proxy: {
     '/api': {

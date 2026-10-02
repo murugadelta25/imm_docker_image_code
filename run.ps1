@@ -504,33 +504,80 @@ if ($networkIPs.Count -eq 0) {
     Write-StepOk ("Network configured ({0}, Vite proxy enabled)" -f ($networkIPs -join ', '))
 }
 
-# [5/8] Backend — always use this project's backend\.venv python (no Activate.ps1 required)
+# [5/8] Backend - always use this project's backend\.venv python (no Activate.ps1 required)
 Write-StepHeader 5 "Starting backend on port $BackendPort..."
 if (-not (Test-Path $venvPython)) {
     Write-StepFail "backend\.venv\Scripts\python.exe missing after dependency setup."
     exit 1
 }
-$backendCmd = "Set-Location -LiteralPath '$BackendDir'; & '$venvPython' -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload"
-Start-Process powershell -ArgumentList @(
-    "-NoExit", "-Command", $backendCmd
-) -WindowStyle Normal
-Start-Sleep -Seconds 3
-$backendOk = $false
-for ($i = 1; $i -le 30; $i++) {
+
+function Test-BackendHealth {
     try {
         $null = Invoke-WebRequest -Uri "http://127.0.0.1:$BackendPort/health" -UseBasicParsing -TimeoutSec 2
-        $backendOk = $true
-        break
+        return $true
     } catch {
-        Start-Sleep -Seconds 1
+        return $false
     }
 }
-if ($backendOk) {
-    Write-StepOk "Backend running (dedicated PowerShell window)"
+
+function Stop-PortListeners {
+    param([int]$Port)
+    $pids = @()
+    try {
+        $pids = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty OwningProcess -Unique |
+            Where-Object { $_ -and $_ -gt 0 })
+    } catch { }
+    foreach ($procId in $pids) {
+        try {
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+            $cmd = [string]$proc.CommandLine
+            if ($cmd -match 'uvicorn|app\.main') {
+                Write-Host ("  Stopping previous backend PID {0} on port {1}" -f $procId, $Port) -ForegroundColor DarkGray
+                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+}
+
+$backendAlreadyUp = Test-BackendHealth
+if ($backendAlreadyUp) {
+    Write-StepOk "Backend already running on port $BackendPort"
 } else {
-    Write-StepFail "Backend not responding on port $BackendPort"
-    Write-Host "  Check the Backend PowerShell window for errors (MySQL connection, import errors)." -ForegroundColor Yellow
-    exit 1
+    Stop-PortListeners -Port $BackendPort
+    Start-Sleep -Milliseconds 500
+    $backendLog = Join-Path $env:TEMP "eap_pms_backend_8040.log"
+    $backendCmd = @"
+Set-Location -LiteralPath '$BackendDir'
+`$host.UI.RawUI.WindowTitle = 'EAP PMS Backend :$BackendPort'
+Write-Host 'Backend starting... log: $backendLog' -ForegroundColor Cyan
+& '$venvPython' -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload 2>&1 | Tee-Object -FilePath '$backendLog'
+"@
+    Start-Process powershell -ArgumentList @(
+        "-NoExit", "-Command", $backendCmd
+    ) -WindowStyle Normal
+
+    $backendOk = $false
+    for ($i = 1; $i -le 60; $i++) {
+        if (Test-BackendHealth) {
+            $backendOk = $true
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+    if ($backendOk) {
+        Write-StepOk "Backend running (dedicated PowerShell window)"
+    } else {
+        Write-StepFail "Backend not responding on port $BackendPort"
+        Write-Host "  Check the Backend PowerShell window for errors (MySQL connection, import errors)." -ForegroundColor Yellow
+        if (Test-Path $backendLog) {
+            Write-Host "  Last log lines ($backendLog):" -ForegroundColor Yellow
+            Get-Content $backendLog -Tail 25 -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host ("    " + $_) -ForegroundColor DarkYellow
+            }
+        }
+        exit 1
+    }
 }
 
 # [6/8] Frontend
@@ -557,7 +604,7 @@ if ($frontendOk) {
     exit 1
 }
 
-# [7/8] nginx — standard URL din.eappms
+# [7/8] nginx - standard URL din.eappms
 Write-StepHeader 7 "Configuring standard URL (nginx reverse proxy)..."
 $domainCfg = $null
 try {
@@ -565,7 +612,7 @@ try {
     Write-StepOk ("Standard URL ready: {0}" -f $domainCfg.Url)
 } catch {
     Write-StepFail ("nginx setup failed: {0}" -f $_.Exception.Message)
-    Write-Host "  Tip: run PowerShell as Administrator (port 80 + hosts file). Direct URLs on :5184 still work." -ForegroundColor Yellow
+    Write-Host "  Tip: run PowerShell as Administrator (port 80 + hosts + firewall). Prefer http://din.eappms or http://<ip> (port 80)." -ForegroundColor Yellow
     $domainCfg = Get-DomainConfig
 }
 
@@ -574,7 +621,7 @@ if ($domainCfg -and $domainCfg.HostsRegistered) {
     $hostsReady = $true
 }
 
-# [8/8] LAN DNS — din.eappms for all devices on the network
+# [8/8] LAN DNS - din.eappms for all devices on the network
 Write-StepHeader 8 "Starting LAN DNS (network-wide din.eappms)..."
 $dnsCfg = $null
 $prevEaDns = $ErrorActionPreference
@@ -614,9 +661,12 @@ Write-Host ""
 Write-Host "  Direct access (fallback):" -ForegroundColor White
 Write-Host ("    -> Local  : http://localhost:{0}" -f $FrontendPort) -ForegroundColor DarkGray
 foreach ($ip in $networkIPs) {
-    Write-Host ("    -> Network (port 80) : http://{0}" -f $ip) -ForegroundColor Green
-    Write-Host ("    -> Network (Vite)    : http://{0}:{1}" -f $ip, $FrontendPort) -ForegroundColor DarkGray
+    Write-Host ("    -> Network (preferred) : http://{0}" -f $ip) -ForegroundColor Green
+    Write-Host ("    -> Network (Vite :{0})  : http://{1}:{0}  (needs firewall rule)" -f $FrontendPort, $ip) -ForegroundColor DarkGray
 }
+Write-Host ""
+Write-Host "  LAN tip: use port 80 / din.eappms from other PCs. :5184 times out if Windows Firewall blocks Vite." -ForegroundColor Yellow
+Write-Host "  502 Bad Gateway usually means backend (8040) or frontend (5184) window stopped - keep both open." -ForegroundColor Yellow
 Write-Host ""
 $primaryIp = if ($dnsCfg -and $dnsCfg.LanIp) { $dnsCfg.LanIp } else { Get-PrimaryLanIp -Ips $networkIPs -ProjectDir $ProjectDir }
 Write-Host "  Network access (Windows / Ubuntu / Android):" -ForegroundColor White

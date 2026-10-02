@@ -194,13 +194,6 @@
           "roles": ["admin", "superadmin"]
         },
         {
-          "id": "settings.parts",
-          "label": "Part Master",
-          "path": "/parts",
-          "navIcon": "parts",
-          "roles": ["admin", "superadmin", "supervisor"]
-        },
-        {
           "id": "settings.tools",
           "label": "Mold Management",
           "path": "/molds",

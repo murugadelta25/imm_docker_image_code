@@ -22,8 +22,20 @@ from .models import (
 
 CATALOG_PATH = Path(__file__).resolve().parent / "data" / "imm_opcua_parameters.json"
 
-# Max age of Motor/Heater samples before a machine is treated as Offline
-IMM_STATUS_MAX_AGE_SEC = int(os.getenv("IMM_STATUS_MAX_AGE_SEC", "180"))
+# Max age of Motor/Heater samples before a machine is treated as Offline.
+# Node-RED often pushes on-change only, so keep a generous window (default 30 min).
+IMM_STATUS_MAX_AGE_SEC = int(os.getenv("IMM_STATUS_MAX_AGE_SEC", "1800"))
+
+# After Actual_Charging_Time / Actual_Injection_Time value changes, show Running this long
+IMM_CYCLE_ACTIVITY_SEC = int(os.getenv("IMM_CYCLE_ACTIVITY_SEC", "120"))
+
+CYCLE_ACTIVITY_KEYS = ("Actual_Charging_Time", "Actual_Injection_Time")
+
+# Prefixed SIE tags (IMM18_Motor_status) → catalog keys (Motor_Status)
+_STATUS_ALIAS_RE = re.compile(
+    r"^(?:IMM[_\s]?\d+[_\s]?)?(Motor|Heater|Injection|Refilling|Connection)_?[Ss]tatus$",
+    re.IGNORECASE,
+)
 
 # Overview / card highlights from Dia Edge parameter list
 HIGHLIGHT_KEYS = (
@@ -47,6 +59,13 @@ HIGHLIGHT_KEYS = (
     "Heater_Status",
     "Auto_Mode",
     "Manual_Mode",
+    "Injection_Status",
+    "Refilling_Status",
+    "Actual_Injection_Time",
+    "Energy_Power_Factor",
+    "Energy_Shift_Kwh",
+    "Energy_Ampere_Rating",
+    "Energy_Phase_to_Phase_Voltage",
 )
 
 
@@ -60,7 +79,23 @@ def load_catalog() -> dict:
 def seed_param_defs(db: Session) -> int:
     """Upsert Dia Edge catalog into imm_opcua_param_defs. Returns inserted/updated count."""
     catalog = load_catalog()
-    params = catalog.get("parameters") or []
+    params = list(catalog.get("parameters") or [])
+    # Utilities (energy meter, cooling, …) share the same defs table so UI can list them
+    for u in catalog.get("utilities") or []:
+        key = u.get("key")
+        if not key:
+            continue
+        params.append(
+            {
+                "key": key,
+                "display": u.get("display") or u.get("particular") or key,
+                "io_type": u.get("io_type") or "STRING",
+                "category": u.get("category") or "energy",
+                "identified_tag": u.get("particular"),
+                "identified_node_id": None,
+                "kpiv_tag": None,
+            }
+        )
     changed = 0
     for idx, item in enumerate(params, start=1):
         key = item.get("key")
@@ -87,6 +122,14 @@ def seed_param_defs(db: Session) -> int:
 
 def ensure_machine_tag_maps(db: Session, machine_id: int) -> int:
     """Create missing tag maps for a machine from catalog defaults."""
+    # Refresh catalog when energy utilities are missing (one-time upsert after deploy)
+    has_energy = (
+        db.query(ImmOpcuaParamDef.param_key)
+        .filter(ImmOpcuaParamDef.param_key == "Energy_Power_Factor")
+        .first()
+    )
+    if not has_energy:
+        seed_param_defs(db)
     defs = (
         db.query(ImmOpcuaParamDef)
         .filter(ImmOpcuaParamDef.is_active == 1)
@@ -141,6 +184,17 @@ def ensure_all_imm_tag_maps(db: Session) -> int:
     return total
 
 
+def normalize_param_key(key: str) -> str:
+    """Map device-prefixed status tags to catalog keys (IMM18_Motor_status → Motor_Status)."""
+    raw = str(key or "").strip()
+    if not raw:
+        return raw
+    m = _STATUS_ALIAS_RE.match(raw)
+    if m:
+        return f"{m.group(1).title()}_Status"
+    return raw
+
+
 def _parse_value(raw: Any) -> Tuple[Optional[float], Optional[str]]:
     if raw is None:
         return None, None
@@ -191,7 +245,7 @@ def ingest_samples(
         key = item.get("param_key") or item.get("key") or item.get("tag")
         if not key:
             continue
-        key = str(key).strip()
+        key = normalize_param_key(str(key).strip())
         raw = item.get("value")
         if raw is None and "value_text" in item:
             raw = item.get("value_text")
@@ -218,16 +272,35 @@ def ingest_samples(
             .filter(ImmOpcuaLatest.machine_id == machine_id, ImmOpcuaLatest.param_key == key)
             .first()
         )
-        if not latest:
+        value_changed = True
+        if latest:
+            prev_num = latest.value_num
+            prev_text = (latest.value_text or "").strip() if latest.value_text is not None else None
+            new_text = (value_text or "").strip() if value_text is not None else None
+            same_num = (
+                prev_num is not None
+                and value_num is not None
+                and abs(float(prev_num) - float(value_num)) < 1e-9
+            ) or (prev_num is None and value_num is None)
+            same_text = (prev_text or "") == (new_text or "")
+            value_changed = not (same_num and same_text)
+        else:
             latest = ImmOpcuaLatest(machine_id=machine_id, param_key=key)
             db.add(latest)
+
         latest.value_num = value_num
         latest.value_text = (value_text or "")[:255] if value_text is not None else None
         latest.quality = quality
         latest.source = source[:40]
-        latest.recorded_at = now
+        # For cycle-activity tags, only refresh recorded_at when the value actually changes
+        # so "Running" expires after IMM_CYCLE_ACTIVITY_SEC without new cycle progress.
+        if key in CYCLE_ACTIVITY_KEYS:
+            if value_changed:
+                latest.recorded_at = now
+        else:
+            latest.recorded_at = now
 
-        if write_history:
+        if write_history and (key not in CYCLE_ACTIVITY_KEYS or value_changed):
             db.add(
                 ImmOpcuaSample(
                     machine_id=machine_id,
@@ -256,7 +329,54 @@ def ingest_samples(
         accepted += 1
 
     db.commit()
+
+    # Mirror Motor/Heater-derived status into machine_status_log for Hit Rate / OEE
+    try:
+        sync_imm_status_log(db, machine_id, source=f"imm_{source}"[:40])
+    except Exception:
+        pass
+
     return {"accepted": accepted, "kpiv_written": kpiv_written, "recorded_at": now.isoformat()}
+
+
+def sync_imm_status_log(db: Session, machine_id: int, source: str = "imm_opcua") -> Optional[str]:
+    """Write MachineStatusLog when EAP IMM derived status changes."""
+    from .models import Machine, MachineStatusLog
+    from .routers.machines import _log_status
+
+    hl = highlights_for_machine(db, machine_id)
+    live = eap_imm_status_from_opcua_highlights(hl)  # running|available|idle|stop|offline
+    # machine.status enum has no stop/available — map for Machine row only
+    machine_status = {
+        "running": "running",
+        "available": "idle",
+        "idle": "idle",
+        "stop": "idle",
+        "offline": "offline",
+    }.get(live, "offline")
+    # Log keeps available/stop so hit-rate can treat running ≠ available
+    log_status = live if live in ("running", "available", "idle", "stop", "offline") else machine_status
+
+    m = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not m:
+        return None
+
+    last = (
+        db.query(MachineStatusLog)
+        .filter(MachineStatusLog.machine_id == machine_id)
+        .order_by(MachineStatusLog.changed_at.desc(), MachineStatusLog.id.desc())
+        .first()
+    )
+    if last and (last.status or "").lower() == log_status:
+        if m.status != machine_status:
+            m.status = machine_status
+            db.commit()
+        return log_status
+
+    _log_status(machine_id, log_status, source[:50], db)
+    m.status = machine_status
+    db.commit()
+    return log_status
 
 
 def latest_payload(db: Session, machine_id: int) -> List[dict]:
@@ -304,9 +424,17 @@ def highlights_for_machine(db: Session, machine_id: int) -> Dict[str, Any]:
         r.param_key: r
         for r in db.query(ImmOpcuaLatest).filter(ImmOpcuaLatest.machine_id == machine_id).all()
     }
+    # Prefer catalog keys; fall back to device-prefixed aliases (IMM18_Motor_status)
+    by_norm: Dict[str, Any] = {}
+    for pk, r in rows.items():
+        nk = normalize_param_key(pk)
+        prev = by_norm.get(nk)
+        if prev is None or (r.recorded_at and (not prev.recorded_at or r.recorded_at >= prev.recorded_at)):
+            by_norm[nk] = r
+
     out = {}
     for key in HIGHLIGHT_KEYS:
-        r = rows.get(key)
+        r = rows.get(key) or by_norm.get(key)
         if not r:
             continue
         out[key] = {
@@ -349,7 +477,14 @@ def _highlight_recorded_at(entry: dict) -> Optional[datetime]:
 
 
 def _status_samples_stale(opcua: dict, max_age_sec: int = IMM_STATUS_MAX_AGE_SEC) -> bool:
-    """True when Motor/Heater samples are missing timestamps or too old to trust."""
+    """True when Motor/Heater samples are too old to trust as live.
+
+    If Connection_Status is present and ON/true, treat Motor/Heater as live even when
+    Node-RED skipped unchanged pushes (recorded_at not refreshed).
+    """
+    if "Connection_Status" in opcua and _opcua_flag(opcua, "Connection_Status"):
+        return False
+
     now = now_ist().replace(tzinfo=None)
     ages = []
     for key in ("Motor_Status", "Heater_Status"):
@@ -357,27 +492,39 @@ def _status_samples_stale(opcua: dict, max_age_sec: int = IMM_STATUS_MAX_AGE_SEC
             continue
         ts = _highlight_recorded_at(opcua.get(key) or {})
         if ts is None:
-            # Cannot prove the sample is live — treat as Offline
-            return True
+            continue
         ages.append((now - ts).total_seconds())
     if not ages:
-        return True
+        return False
     return min(ages) > max_age_sec
+
+
+def _cycle_activity_recent(opcua: dict, max_age_sec: int = IMM_CYCLE_ACTIVITY_SEC) -> bool:
+    """True when Actual_Charging_Time or Actual_Injection_Time changed recently."""
+    now = now_ist().replace(tzinfo=None)
+    for key in CYCLE_ACTIVITY_KEYS:
+        entry = opcua.get(key)
+        if not entry:
+            continue
+        ts = _highlight_recorded_at(entry)
+        if ts is None:
+            continue
+        if (now - ts).total_seconds() <= max_age_sec:
+            return True
+    return False
 
 
 def eap_imm_status_from_opcua_highlights(opcua: dict) -> str:
     """Derive EAP IMM machine status from latest OPC UA / Node-RED highlight values.
 
-    Motor_Status / Heater_Status take priority when both are present (live data):
-      1 / 1 → running (green)
-      1 / 0 or 0 / 1 → idle (cyan)
-      0 / 0 → stop (red)
+    Same rule for every IMM (IMM17, IMM18, …):
+      Motor ON + Heater ON + recent Charging/Injection time change → running
+      Motor ON + Heater ON (powered, not cycling)                 → available
+      only one of Motor/Heater ON                                   → idle
+      both OFF                                                     → stop
 
-    Offline: no Motor/Heater data received at all (SIE/OPC UA not connected),
-    or samples older than IMM_STATUS_MAX_AGE_SEC.
-
-    Note: Connection_Status alone must NOT override Motor/Heater — on Dia Edge
-    Connection_Status can be 0 while Motor/Heater are ON and the machine is running.
+    Offline when Motor/Heater tags are missing or samples are too old to trust.
+    Prefixed tags (IMM18_Motor_status) normalize to Motor_Status / Heater_Status.
     """
     if not opcua:
         return "offline"
@@ -385,19 +532,19 @@ def eap_imm_status_from_opcua_highlights(opcua: dict) -> str:
     has_motor = "Motor_Status" in opcua
     has_heater = "Heater_Status" in opcua
 
-    # Live Motor + Heater values are the app-wide machine status source of truth
     if has_motor and has_heater:
         if _status_samples_stale(opcua):
             return "offline"
         motor = _opcua_flag(opcua, "Motor_Status")
         heater = _opcua_flag(opcua, "Heater_Status")
         if motor and heater:
-            return "running"
+            if _cycle_activity_recent(opcua):
+                return "running"
+            return "available"
         if motor or heater:
             return "idle"
         return "stop"
 
-    # No Motor/Heater samples → Offline (e.g. BadNotConnected, never synced)
     return "offline"
 
 

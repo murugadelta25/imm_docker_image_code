@@ -258,15 +258,44 @@ function Test-NginxListening {
     }
 }
 
-function Open-FirewallPort80 {
-    $ruleName = "EAP PMS nginx HTTP 80"
-    $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
-    if (-not $existing) {
+function Open-FirewallTcpPort {
+    param(
+        [string]$RuleName,
+        [int]$Port
+    )
+    $existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+    if ($existing) {
+        # Ensure rule is enabled and still targets the expected port
         try {
-            New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow | Out-Null
-            Write-Host "  [OK] Firewall rule added for TCP 80" -ForegroundColor Green
-        } catch {
-            Write-Host "  [WARN] Could not add firewall rule for port 80 (Administrator?)" -ForegroundColor Yellow
+            Set-NetFirewallRule -DisplayName $RuleName -Enabled True -ErrorAction SilentlyContinue | Out-Null
+        } catch { }
+        return
+    }
+    try {
+        New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow | Out-Null
+        Write-Host ("  [OK] Firewall rule added for TCP {0}" -f $Port) -ForegroundColor Green
+    } catch {
+        Write-Host ("  [WARN] Could not add firewall rule for port {0} (Administrator?)" -f $Port) -ForegroundColor Yellow
+    }
+}
+
+function Open-EapPmsFirewallPorts {
+    param(
+        [int]$BackendPort = 8040,
+        [int]$FrontendPort = 5184
+    )
+    Open-FirewallTcpPort -RuleName "EAP PMS nginx HTTP 80" -Port 80
+    Open-FirewallTcpPort -RuleName "EAP PMS Vite $FrontendPort" -Port $FrontendPort
+    Open-FirewallTcpPort -RuleName "EAP PMS API $BackendPort" -Port $BackendPort
+
+    # Stale rules from older Titan ports — disable if present (do not delete user custom rules)
+    foreach ($stale in @("EAP-PMS Vite 5174", "EAP-PMS 8010")) {
+        $old = Get-NetFirewallRule -DisplayName $stale -ErrorAction SilentlyContinue
+        if ($old) {
+            try {
+                Disable-NetFirewallRule -DisplayName $stale -ErrorAction SilentlyContinue | Out-Null
+                Write-Host ("  [INFO] Disabled obsolete firewall rule: {0}" -f $stale) -ForegroundColor DarkGray
+            } catch { }
         }
     }
 }
@@ -322,7 +351,8 @@ if (-not $nginxProc -and -not $portOpen) {
 Write-NginxStep "Registering hosts entry..."
 $hostsRegistered = Ensure-HostsEntry -Domain $domainCfg.Domain -Ip "127.0.0.1"
 $domainCfg.HostsRegistered = $hostsRegistered
-Open-FirewallPort80
+Write-NginxStep "Opening firewall for nginx / Vite / API..."
+Open-EapPmsFirewallPorts -BackendPort $BackendPort -FrontendPort $FrontendPort
 
 Write-Host "  [OK] nginx proxy active - $($domainCfg.Url)" -ForegroundColor Green
 Write-Host "  [OK] nginx root: $script:NginxRoot" -ForegroundColor DarkGray

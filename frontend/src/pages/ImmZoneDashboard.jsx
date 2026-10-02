@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import api from '../api/client';
+import { assetUrl } from '../api/config';
 import PageHeader from '../components/PageHeader';
 import ImmDashboardSelector from '../components/ImmDashboardSelector';
 import AnimatedBarChart from '../components/charts/AnimatedBarChart';
@@ -10,6 +11,207 @@ import { pageClass, surfaceClass, tileClass } from '../themes/tileHelpers';
 
 const stripCjk = (v) =>
   String(v ?? '').replace(/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/g, '');
+
+function fmtQty(v) {
+  if (v == null || v === '') return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  return n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+}
+
+function oeeColor(pct) {
+  const n = Number(pct) || 0;
+  if (n >= 85) return '#22c55e';
+  if (n >= 65) return '#eab308';
+  if (n > 0) return '#ef4444';
+  return '#94a3b8';
+}
+
+function statusBarStyle(m, t) {
+  const key = m.imm_status || m.eap_imm_status || 'offline';
+  if (key === 'production' || key === 'running') {
+    return { bg: '#16a34a', fg: '#fff', label: 'Running' };
+  }
+  if (key === 'available') {
+    return { bg: '#2563eb', fg: '#fff', label: 'Available' };
+  }
+  if (key === 'idle') {
+    return { bg: '#0ea5e9', fg: '#041018', label: 'Idle' };
+  }
+  if (key === 'stop') {
+    return { bg: '#dc2626', fg: '#fff', label: 'Stop' };
+  }
+  if (key === 'offline') {
+    return { bg: '#64748b', fg: '#fff', label: 'Offline' };
+  }
+  return {
+    bg: m.imm_status_color || t.textFaint || '#64748b',
+    fg: '#fff',
+    label: m.imm_status_label || '—',
+  };
+}
+
+function MachineZoneTile({ m, theme: t, onOpen }) {
+  const tile = m.tile || {};
+  const oee = Number(tile.oee) || 0;
+  const status = statusBarStyle(m, t);
+  const rows = [
+    { label: 'Total Production', value: `${fmtQty(tile.total_production)} Unit` },
+    { label: 'Total Good Parts', value: `${fmtQty(tile.total_good)} Unit` },
+    { label: 'Total Bad Parts', value: `${fmtQty(tile.total_bad)} Unit` },
+    {
+      label: 'Total Downtime',
+      value: tile.downtime_min == null ? '— Min.' : `${fmtQty(tile.downtime_min)} Min.`,
+    },
+    {
+      label: 'Last Hr Bad Parts',
+      value: tile.last_hr_bad == null ? '— Unit' : `${fmtQty(tile.last_hr_bad)} Unit`,
+    },
+  ];
+
+  return (
+    <button
+      type="button"
+      className={tileClass(t)}
+      onClick={onOpen}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        padding: 0,
+        overflow: 'hidden',
+        background: t.isDark === false || t.id === 'light' ? '#e8eef3' : (t.surface2 || '#0f172a'),
+        border: `1px solid ${t.border}`,
+        borderRadius: 10,
+        cursor: 'pointer',
+        textAlign: 'left',
+        minHeight: 420,
+        color: 'inherit',
+      }}
+    >
+      <div style={{
+        background: '#111827',
+        color: '#facc15',
+        fontWeight: 800,
+        fontSize: 14,
+        textAlign: 'center',
+        padding: '8px 6px',
+        letterSpacing: 0.3,
+      }}>
+        {stripCjk(m.name)}
+      </div>
+
+      <div style={{ padding: '6px 8px 0' }}>
+        {rows.map((r) => (
+          <div
+            key={r.label}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1.15fr 0.85fr',
+              gap: 4,
+              marginBottom: 4,
+            }}
+          >
+            <div style={{
+              background: t.isDark === false || t.id === 'light' ? '#dbe3ea' : '#1e293b',
+              border: `1px solid ${t.border}`,
+              padding: '5px 7px',
+              fontSize: 11,
+              fontWeight: 700,
+              color: t.text,
+            }}>
+              {r.label}
+            </div>
+            <div style={{
+              background: t.isDark === false || t.id === 'light' ? '#fff' : '#0b1220',
+              border: `1px solid ${t.border}`,
+              padding: '5px 7px',
+              fontSize: 11,
+              fontWeight: 800,
+              color: t.text,
+              textAlign: 'right',
+            }}>
+              {r.value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{
+        margin: '6px 8px 0',
+        background: '#374151',
+        color: '#fff',
+        fontWeight: 800,
+        fontSize: 12,
+        textAlign: 'center',
+        padding: '5px 6px',
+      }}>
+        Inprocess Insp.
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0 4px' }}>
+        <DonutGauge
+          value={oee}
+          color={oeeColor(oee)}
+          trackColor={t.isDark === false || t.id === 'light' ? '#cbd5e1' : '#1e293b'}
+          theme={t}
+          valueSize={18}
+          valueText={(
+            <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', lineHeight: 1.15 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: t.textMuted || '#94a3b8' }}>OEE</span>
+              <span style={{ fontSize: 18, fontWeight: 800 }}>{Math.round(oee)} %</span>
+            </span>
+          )}
+        />
+      </div>
+
+      <div style={{
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '4px 10px 8px',
+        minHeight: 88,
+      }}>
+        {m.image_url ? (
+          <img
+            src={assetUrl(m.image_url)}
+            alt={stripCjk(m.name)}
+            style={{ maxWidth: '100%', maxHeight: 96, objectFit: 'contain' }}
+          />
+        ) : (
+          <div style={{
+            width: '86%',
+            height: 72,
+            borderRadius: 8,
+            background: `linear-gradient(135deg, #ef4444 0%, #eab308 35%, #22c55e 65%, #3b82f6 100%)`,
+            opacity: 0.85,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#041018',
+            fontWeight: 800,
+            fontSize: 12,
+          }}>
+            IMM
+          </div>
+        )}
+      </div>
+
+      <div style={{
+        margin: '0 10px 10px',
+        background: status.bg,
+        color: status.fg,
+        fontWeight: 800,
+        fontSize: 13,
+        textAlign: 'center',
+        padding: '8px 6px',
+        borderRadius: 4,
+      }}>
+        {status.label}
+      </div>
+    </button>
+  );
+}
 
 export default function ImmZoneDashboard() {
   const { zoneId } = useParams();
@@ -22,6 +224,7 @@ export default function ImmZoneDashboard() {
 
   const statusMeta = {
     running: { label: 'Running', color: t.brand || '#77AF46' },
+    available: { label: 'Available', color: '#3b82f6' },
     warning: { label: 'Warning', color: '#eab308' },
     idle: { label: 'Idle', color: t.textDim || '#22cae7' },
     stop: { label: 'Stop', color: '#ef4444' },
@@ -136,6 +339,7 @@ export default function ImmZoneDashboard() {
             <div style={s.statusGrid}>
               {[
                 { key: 'running', count: sc.running ?? sc.production ?? 0 },
+                { key: 'available', count: sc.available || 0 },
                 { key: 'warning', count: (sc.warning || 0) + (sc.abnormal || 0) },
                 { key: 'idle', count: sc.idle || 0 },
                 { key: 'stop', count: sc.stop || 0 },
@@ -194,36 +398,12 @@ export default function ImmZoneDashboard() {
             </div>
           )}
           {blockMachines.map((m) => (
-            <button
+            <MachineZoneTile
               key={m.id}
-              type="button"
-              className={tileClass(t)}
-              style={s.machineCard}
-              onClick={() => navigate(`/imm/equipment/${m.id}`)}
-            >
-              <div style={{ color: t.text, fontWeight: 800, fontSize: 14 }}>{stripCjk(m.name)}</div>
-              <div style={{
-                marginTop: 18,
-                background: m.imm_status_color || t.textFaint,
-                color: t.isDark ? '#041018' : '#fff',
-                borderRadius: 8,
-                padding: '8px 10px',
-                fontWeight: 800,
-                textAlign: 'center',
-                border: `1px solid ${t.border}`,
-              }}>
-                {m.imm_status_label}
-              </div>
-              <div style={{
-                marginTop: 6,
-                fontSize: 11,
-                fontWeight: 700,
-                textAlign: 'center',
-                color: m.kpiv_status_color || '#86efac',
-              }}>
-                KPIV: {m.kpiv_status_label || (m.err_msgs?.length ? 'Abnormal' : 'Normal')}
-              </div>
-            </button>
+              m={m}
+              theme={t}
+              onOpen={() => navigate(`/imm/equipment/${m.id}`)}
+            />
           ))}
         </div>
       </section>
@@ -287,17 +467,9 @@ function styles(t) {
     },
     machineGrid: {
       display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
-      gap: 12,
-    },
-    machineCard: {
-      background: t.surface2,
-      border: `1px solid ${t.border}`,
-      borderRadius: 12,
-      padding: 12,
-      cursor: 'pointer',
-      textAlign: 'left',
-      minHeight: 110,
+      gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
+      gap: 14,
+      alignItems: 'stretch',
     },
     empty: { color: t.textFaint, padding: 24, textAlign: 'center', gridColumn: '1 / -1' },
   };

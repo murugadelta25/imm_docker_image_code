@@ -19,7 +19,29 @@ const EMPTY_FORM = {
   cycles_per_part: '1',
   qr_code: '',
   notes: '',
+  part_no: '',
+  standard_cavity: '1',
+  running_cavity: '1',
+  customer_name: '',
+  rm_grade: '',
+  standard_cycle_time: '',
+  std_shot_weight: '',
+  std_part_weight: '',
+  std_runner_weight: '',
+  colour: '',
+  target_per_shift: '',
+  cavities: [{ id: 'c1', name: '', enabled: true, part_no: '' }],
 };
+
+function newCavityId() {
+  return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function numOrNull(v) {
+  if (v === '' || v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
 
 const EMPTY_SAP = {
   sap_material_no: '',
@@ -101,6 +123,14 @@ export default function ToolManagement() {
 
   const openEdit = (row) => {
     setEditingId(row.id);
+    const cavities = Array.isArray(row.cavities) && row.cavities.length
+      ? row.cavities.map((c, i) => ({
+        id: c.id || `c${i + 1}`,
+        name: c.name || '',
+        enabled: !!c.enabled,
+        part_no: c.part_no || '',
+      }))
+      : [{ id: 'c1', name: '', enabled: true, part_no: '' }];
     setForm({
       tool_code: row.tool_code || '',
       tool_name: row.tool_name || '',
@@ -115,17 +145,73 @@ export default function ToolManagement() {
       cycles_per_part: String(row.cycles_per_part ?? 1),
       qr_code: row.qr_code || '',
       notes: row.notes || '',
+      part_no: row.part_no || '',
+      standard_cavity: row.standard_cavity != null ? String(row.standard_cavity) : '1',
+      running_cavity: row.running_cavity != null ? String(row.running_cavity) : '1',
+      customer_name: row.customer_name || '',
+      rm_grade: row.rm_grade || '',
+      standard_cycle_time: row.standard_cycle_time != null ? String(row.standard_cycle_time) : '',
+      std_shot_weight: row.std_shot_weight != null ? String(row.std_shot_weight) : '',
+      std_part_weight: row.std_part_weight != null ? String(row.std_part_weight) : '',
+      std_runner_weight: row.std_runner_weight != null ? String(row.std_runner_weight) : '',
+      colour: row.colour || '',
+      target_per_shift: row.target_per_shift != null ? String(row.target_per_shift) : '',
+      cavities,
     });
     setShowForm(true);
+  };
+
+  const setCavityActive = (cavityId) => {
+    setForm((p) => ({
+      ...p,
+      cavities: (p.cavities || []).map((c) => ({
+        ...c,
+        enabled: c.id === cavityId,
+      })),
+    }));
   };
 
   const saveTool = async (e) => {
     e.preventDefault();
     if (!form.tool_code.trim() || !form.tool_name.trim()) {
-      setMsg('❌ Tool code and name are required');
+      setMsg('❌ Mold code and Mold name are required');
       return;
     }
+    const requiredImm = [
+      ['part_no', 'Part No.'],
+      ['customer_name', 'Customer Name'],
+      ['rm_grade', 'RM Grade'],
+      ['colour', 'Colour'],
+      ['standard_cavity', 'Standard Cavity'],
+      ['running_cavity', 'Running Cavity'],
+      ['standard_cycle_time', 'Standard Cycle Time'],
+      ['std_shot_weight', 'Std. Shot Weight'],
+      ['std_part_weight', 'Std. Part Weight'],
+      ['std_runner_weight', 'Std. Runner Weight'],
+      ['target_per_shift', 'Target / Shift'],
+    ];
+    for (const [key, label] of requiredImm) {
+      if (form[key] === '' || form[key] == null) {
+        setMsg(`❌ ${label} is required`);
+        return;
+      }
+    }
     const toolCode = form.tool_code.trim();
+    const cavities = (form.cavities || [])
+      .map((c, i) => ({
+        id: c.id || `c${i + 1}`,
+        name: (c.name || '').trim(),
+        enabled: !!c.enabled,
+        part_no: (c.part_no || '').trim() || null,
+      }))
+      .filter((c) => c.name);
+    if (!cavities.length) {
+      setMsg('❌ At least one Cavity Name is required (e.g. Base, Cover)');
+      return;
+    }
+    if (!cavities.some((c) => c.enabled)) {
+      cavities[0].enabled = true;
+    }
     const payload = {
       tool_name: form.tool_name.trim(),
       unit: form.unit || 'pcs',
@@ -139,14 +225,26 @@ export default function ToolManagement() {
       cycles_per_part: parseFloat(form.cycles_per_part) || 1,
       qr_code: form.qr_code.trim() || toolCode || null,
       notes: form.notes || null,
+      part_no: form.part_no.trim() || null,
+      standard_cavity: numOrNull(form.standard_cavity),
+      running_cavity: numOrNull(form.running_cavity),
+      customer_name: form.customer_name.trim() || null,
+      rm_grade: form.rm_grade.trim() || null,
+      standard_cycle_time: numOrNull(form.standard_cycle_time),
+      std_shot_weight: numOrNull(form.std_shot_weight),
+      std_part_weight: numOrNull(form.std_part_weight),
+      std_runner_weight: numOrNull(form.std_runner_weight),
+      colour: form.colour.trim() || null,
+      target_per_shift: numOrNull(form.target_per_shift),
+      cavities,
     };
     try {
       if (editingId) {
         await api.put(`/api/tools/${editingId}`, payload);
-        setMsg('✅ Tool updated');
+        setMsg('✅ Mold updated');
       } else {
         await api.post('/api/tools/', { ...payload, tool_code: toolCode });
-        setMsg('✅ Tool created — QR generated from tool code');
+        setMsg('✅ Mold created — QR generated from mold code');
       }
       setShowForm(false);
       setEditingId(null);
@@ -159,10 +257,10 @@ export default function ToolManagement() {
   };
 
   const removeTool = async (id) => {
-    if (!window.confirm('Deactivate this tool from inventory?')) return;
+    if (!window.confirm('Deactivate this mold from inventory?')) return;
     try {
       await api.delete(`/api/tools/${id}`);
-      setMsg('✅ Tool deactivated');
+      setMsg('✅ Mold deactivated');
       load();
     } catch (err) {
       setMsg('❌ ' + (err.response?.data?.detail || err.message));
@@ -323,7 +421,7 @@ export default function ToolManagement() {
       )}
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-        <StatCard t={t} label="Tools" value={tools.length} />
+        <StatCard t={t} label="Molds" value={tools.length} />
         <StatCard t={t} label="Below Min" value={lowCount} alert={lowCount > 0} />
         <StatCard t={t} label="Life Watch" value={eolCount} alert={eolCount > 0} />
         <StatCard t={t} label="Open Alerts" value={alerts.length} alert={alerts.length > 0} />
@@ -401,13 +499,13 @@ export default function ToolManagement() {
 
       {tab === 'monitor' && (
         <div className={surfaceClass(t)} style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: 16, fontSize: 13, color: t.textMuted, lineHeight: 1.6 }}>
-          <div style={{ fontWeight: 600, color: t.accent, marginBottom: 8 }}>How tool monitoring works</div>
+          <div style={{ fontWeight: 600, color: t.accent, marginBottom: 8 }}>How mold monitoring works</div>
           <ul style={{ margin: 0, paddingLeft: 18 }}>
-            <li>Set <strong>Life cycles limit</strong> (e.g. 50000 / 100000) and optional QR code (scan suppressed until go-live).</li>
-            <li>Production actual qty on a work-order plan adds cycles to mapped tools and records where they were consumed.</li>
+            <li>Set <strong>Life cycles limit</strong> (e.g. 50000 / 100000) and IMM fields (Part No., cavities, shot/part/runner weights, target/shift).</li>
+            <li>Add multiple <strong>Cavity Names</strong> (e.g. Base, Cover) and enable only the one in use — remaining production logs against that cavity/part.</li>
+            <li>Production actual qty on a work-order plan adds cycles to mapped molds and records cavity + location.</li>
             <li>Below min stock or near EOL → alert in this page + header notification (can suppress).</li>
-            <li>At EOL the tool is blocked for planning until <strong>Correction</strong> (temp continue) or <strong>Replace</strong> (reset life, consume 1 stock).</li>
-            <li>Planning a WO forecasts stock + life; if short/near EOL the planner must acknowledge to proceed.</li>
+            <li>At EOL the mold is blocked for planning until <strong>Correction</strong> (temp continue) or <strong>Replace</strong> (reset life, consume 1 stock).</li>
             <li><strong>Download Report</strong> exports Excel (inventory / alerts / consumption).</li>
             <li>Auto schedule: Alerts → Email → group report types → enable <strong>Mold Management</strong>, then add a schedule.</li>
           </ul>
@@ -435,17 +533,17 @@ export default function ToolManagement() {
           </div>
 
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 960 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1100 }}>
               <thead>
                 <tr>
-                  {['Code', 'Name', 'Stock', 'Min', 'Life Used', 'Set Life', 'Status', 'Source', 'QR', 'Actions'].map((h) => (
+                  {['Code', 'Mold Name', 'Part No.', 'Customer', 'Active Cavity', 'Stock', 'Life Used', 'Status', 'QR', 'Actions'].map((h) => (
                     <th key={h} style={th}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {!tools.length && (
-                  <tr><td colSpan={10} style={{ ...td, textAlign: 'center', color: t.textDim }}>No tools.</td></tr>
+                  <tr><td colSpan={10} style={{ ...td, textAlign: 'center', color: t.textDim }}>No molds.</td></tr>
                 )}
                 {tools.map((row) => {
                   const st = STATUS_STYLE[row.tool_status] || STATUS_STYLE.ok;
@@ -454,12 +552,20 @@ export default function ToolManagement() {
                   const pct = limit && limit > 0
                     ? (row.life_used_pct != null ? row.life_used_pct : Math.round((used / limit) * 1000) / 10)
                     : null;
+                  const activeCav = row.active_cavity_name
+                    || row.active_cavity?.name
+                    || (Array.isArray(row.cavities) && row.cavities.find((c) => c.enabled)?.name)
+                    || '—';
                   return (
                     <tr key={row.id}>
                       <td style={{ ...td, fontWeight: 600 }}>{row.tool_code}</td>
                       <td style={td}>{row.tool_name}</td>
+                      <td style={td}>{row.effective_part_no || row.part_no || '—'}</td>
+                      <td style={td}>{row.customer_name || '—'}</td>
+                      <td style={{ ...td, fontWeight: 600, color: activeCav !== '—' ? (t.accent || '#38bdf8') : t.textDim }}>
+                        {activeCav}
+                      </td>
                       <td style={{ ...td, fontWeight: 600, color: row.below_min ? '#ef4444' : t.text }}>{row.stock_qty}</td>
-                      <td style={td}>{row.min_stock}</td>
                       <td style={{
                         ...td,
                         fontWeight: 600,
@@ -469,14 +575,11 @@ export default function ToolManagement() {
                         {pct != null && (
                           <span style={{ marginLeft: 6, fontSize: 11, color: t.textDim }}>({pct}%)</span>
                         )}
-                      </td>
-                      <td style={td}>
-                        {limit != null && limit > 0
-                          ? limit.toLocaleString()
-                          : <span style={{ color: t.textDim }}>Not set</span>}
+                        {limit != null && limit > 0 && (
+                          <span style={{ marginLeft: 6, fontSize: 11, color: t.textDim }}>/ {limit.toLocaleString()}</span>
+                        )}
                       </td>
                       <td style={{ ...td, color: st.color, fontWeight: 600 }}>{st.label}</td>
-                      <td style={td}>{row.stock_source === 'sap' ? 'SAP' : 'Manual'}</td>
                       <td style={td}>
                         <ToolQrCell
                           value={row.qr_code || row.tool_code}
@@ -578,14 +681,15 @@ export default function ToolManagement() {
       )}
 
       {showForm && (
-        <ModalShell t={t} title={editingId ? 'Edit Tool' : 'Add Tool'} onClose={() => setShowForm(false)} wide>
+        <ModalShell t={t} title={editingId ? 'Edit Mold' : 'Add Mold'} onClose={() => setShowForm(false)} wide>
           <form onSubmit={saveTool}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: t.textDim, marginBottom: 6 }}>Inventory / life</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              <Field label="Tool Code *" t={t}>
+              <Field label="Mold Code *" t={t}>
                 <input style={inp} required disabled={!!editingId} value={form.tool_code}
                   onChange={(e) => setForm((p) => ({ ...p, tool_code: e.target.value }))} />
               </Field>
-              <Field label="Tool Name *" t={t}>
+              <Field label="Mold Name *" t={t}>
                 <input style={inp} required value={form.tool_name}
                   onChange={(e) => setForm((p) => ({ ...p, tool_name: e.target.value }))} />
               </Field>
@@ -615,7 +719,7 @@ export default function ToolManagement() {
               </Field>
               <Field label="QR Code (scan suppressed)" t={t}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <input style={{ ...inp, flex: 1 }} value={form.qr_code} placeholder="Defaults to tool code if empty"
+                  <input style={{ ...inp, flex: 1 }} value={form.qr_code} placeholder="Defaults to mold code if empty"
                     onChange={(e) => setForm((p) => ({ ...p, qr_code: e.target.value }))} />
                   {(form.qr_code || form.tool_code) && (
                     <img
@@ -644,6 +748,158 @@ export default function ToolManagement() {
                   onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))} />
               </Field>
             </div>
+
+            <div style={{ fontSize: 12, fontWeight: 700, color: t.textDim, margin: '16px 0 6px' }}>IMM production master</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <Field label="Part No. *" t={t}>
+                <input style={inp} required value={form.part_no}
+                  onChange={(e) => setForm((p) => ({ ...p, part_no: e.target.value }))} />
+              </Field>
+              <Field label="Customer Name *" t={t}>
+                <input style={inp} required value={form.customer_name}
+                  onChange={(e) => setForm((p) => ({ ...p, customer_name: e.target.value }))} />
+              </Field>
+              <Field label="RM Grade *" t={t}>
+                <input style={inp} required value={form.rm_grade} placeholder="Raw material grade"
+                  onChange={(e) => setForm((p) => ({ ...p, rm_grade: e.target.value }))} />
+              </Field>
+              <Field label="Colour *" t={t}>
+                <input style={inp} required value={form.colour}
+                  onChange={(e) => setForm((p) => ({ ...p, colour: e.target.value }))} />
+              </Field>
+              <Field label="Standard Cavity *" t={t}>
+                <input style={inp} required type="number" value={form.standard_cavity}
+                  onChange={(e) => setForm((p) => ({ ...p, standard_cavity: e.target.value }))} />
+              </Field>
+              <Field label="Running Cavity *" t={t}>
+                <input style={inp} required type="number" value={form.running_cavity}
+                  onChange={(e) => setForm((p) => ({ ...p, running_cavity: e.target.value }))} />
+              </Field>
+              <Field label="Standard Cycle Time *" t={t}>
+                <input style={inp} required type="number" step="any" value={form.standard_cycle_time}
+                  onChange={(e) => setForm((p) => ({ ...p, standard_cycle_time: e.target.value }))} />
+              </Field>
+              <Field label="Target / Shift *" t={t}>
+                <input style={inp} required type="number" value={form.target_per_shift}
+                  onChange={(e) => setForm((p) => ({ ...p, target_per_shift: e.target.value }))} />
+              </Field>
+              <Field label="Std. Shot Weight *" t={t}>
+                <input style={inp} required type="number" step="any" value={form.std_shot_weight}
+                  onChange={(e) => setForm((p) => ({ ...p, std_shot_weight: e.target.value }))} />
+              </Field>
+              <Field label="Std. Part Weight *" t={t}>
+                <input style={inp} required type="number" step="any" value={form.std_part_weight}
+                  onChange={(e) => setForm((p) => ({ ...p, std_part_weight: e.target.value }))} />
+              </Field>
+              <Field label="Std. Runner Weight *" t={t}>
+                <input style={inp} required type="number" step="any" value={form.std_runner_weight}
+                  onChange={(e) => setForm((p) => ({ ...p, std_runner_weight: e.target.value }))} />
+              </Field>
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: t.textDim }}>
+                  Cavity Name * (fixtures) — enable one for production logging
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setForm((p) => ({
+                    ...p,
+                    cavities: [...(p.cavities || []), { id: newCavityId(), name: '', enabled: false, part_no: '' }],
+                  }))}
+                  style={{
+                    padding: '4px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                    background: t.surface2, color: t.text, border: `1px solid ${t.border}`, borderRadius: 6,
+                  }}
+                >
+                  + Add cavity
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {(form.cavities || []).map((cav, idx) => (
+                  <div
+                    key={cav.id || idx}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'auto 1.2fr 1fr auto auto',
+                      gap: 8,
+                      alignItems: 'center',
+                      padding: 8,
+                      borderRadius: 8,
+                      border: `1px solid ${cav.enabled ? (t.accent || '#38bdf8') : t.border}`,
+                      background: cav.enabled ? 'rgba(56,189,248,0.08)' : (t.surface2 || t.bg),
+                    }}
+                  >
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 700, color: t.text, whiteSpace: 'nowrap' }}>
+                      <input
+                        type="radio"
+                        name="active-cavity"
+                        checked={!!cav.enabled}
+                        onChange={() => setCavityActive(cav.id)}
+                      />
+                      Active
+                    </label>
+                    <input
+                      style={inp}
+                      placeholder="Cavity name (e.g. Base, Cover)"
+                      value={cav.name}
+                      onChange={(e) => setForm((p) => ({
+                        ...p,
+                        cavities: p.cavities.map((c, i) => (i === idx ? { ...c, name: e.target.value } : c)),
+                      }))}
+                    />
+                    <input
+                      style={inp}
+                      placeholder="Part No. for this cavity"
+                      value={cav.part_no || ''}
+                      onChange={(e) => setForm((p) => ({
+                        ...p,
+                        cavities: p.cavities.map((c, i) => (i === idx ? { ...c, part_no: e.target.value } : c)),
+                      }))}
+                    />
+                    <button
+                      type="button"
+                      title={cav.enabled ? 'Disable cavity' : 'Enable for production'}
+                      onClick={() => {
+                        if (cav.enabled) {
+                          setForm((p) => ({
+                            ...p,
+                            cavities: p.cavities.map((c, i) => (i === idx ? { ...c, enabled: false } : c)),
+                          }));
+                        } else {
+                          setCavityActive(cav.id);
+                        }
+                      }}
+                      style={{
+                        padding: '6px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer', borderRadius: 6,
+                        border: `1px solid ${t.border}`,
+                        background: cav.enabled ? (t.accent || '#38bdf8') : t.surface,
+                        color: cav.enabled ? '#fff' : t.textMuted,
+                      }}
+                    >
+                      {cav.enabled ? 'ON' : 'OFF'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setForm((p) => ({
+                        ...p,
+                        cavities: p.cavities.length <= 1
+                          ? [{ id: newCavityId(), name: '', enabled: true, part_no: '' }]
+                          : p.cavities.filter((_, i) => i !== idx),
+                      }))}
+                      style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontWeight: 700 }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: t.textDim, marginTop: 6 }}>
+                Only the active cavity receives remaining production logging for this mold.
+              </div>
+            </div>
+
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
               <button type="button" onClick={() => setShowForm(false)}
                 style={{ padding: '8px 16px', background: t.surface2, color: t.text, border: `1px solid ${t.border}`, borderRadius: 8, cursor: 'pointer' }}>
@@ -775,7 +1031,7 @@ function ModalShell({ t, title, onClose, children, wide }) {
     }}>
       <div style={{
         background: t.surface, borderRadius: 12, padding: 24, width: '100%',
-        maxWidth: wide ? 860 : 560, maxHeight: '90vh', overflow: 'auto',
+        maxWidth: wide ? 960 : 560, maxHeight: '90vh', overflow: 'auto',
         border: `1px solid ${t.border}`,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14 }}>

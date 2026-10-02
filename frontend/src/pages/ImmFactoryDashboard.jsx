@@ -83,9 +83,9 @@ export default function ImmFactoryDashboard() {
     () => zones.map((z) => ({
       id: z.id,
       name: stripCjk(z.name),
-      pct: z.achievement_pct ?? z.hit_rate ?? z.running_pct ?? 0,
+      pct: z.achievement_has_plan ? (z.achievement_pct ?? 0) : 0,
       actual: z.achievement_actual ?? 0,
-      planned: z.achievement_planned ?? 100,
+      planned: z.achievement_planned ?? 0,
     })),
     [zones],
   );
@@ -94,11 +94,25 @@ export default function ImmFactoryDashboard() {
   const isDark = t?.isDark !== false && t?.id !== 'light';
   const statusColors = statusPalette(isDark);
   const rr = data?.running_rate || { pct: 0, running: 0, total: 0 };
-  const ar = data?.achievement_rate || { pct: 0, actual: 0, planned: 0 };
+  const ar = data?.achievement_rate || { pct: null, actual: 0, planned: 0, has_plan: false };
+  const at = data?.achievement_today || { pct: null, actual: 0, planned: 0, has_plan: false, by_shift: [] };
   const sc = data?.status_counts || {};
   const util = data?.utilization || {};
+  const em = data?.energy_meter || {};
   const chartFill = t.accent;
   const chartFillAlt = t.brand || t.accent;
+
+  const todayShiftBars = useMemo(
+    () => (at.by_shift || []).map((sh) => ({
+      name: stripCjk(sh.name || sh.id),
+      pct: sh.has_plan ? (sh.pct ?? 0) : null,
+      planned: sh.planned,
+      actual: sh.actual,
+      has_plan: !!sh.has_plan,
+      id: sh.id,
+    })),
+    [at.by_shift],
+  );
 
   const utilZones = useMemo(() => {
     if (util.by_line?.length) return util.by_line;
@@ -134,35 +148,48 @@ export default function ImmFactoryDashboard() {
 
   const tiles = [
     {
-      id: 'planAchieve',
+      id: 'planAchieveToday',
       style: cardShell,
       header: <h3 style={s.cardTitle}>Plan Achievement (Today)</h3>,
-      body: (
-        <div style={s.tileBodyRow}>
-          <div style={s.tileBodyFlex}>
-            <OverviewDonutGauge
-              key={`ar-${ar.pct}-${ar.planned}`}
-              value={Math.round(Number(ar.pct) || 0)}
-              useHeatMap
-              size={200}
-              trackColor={isDark ? (t.surface2 || '#1e293b') : '#e2e8f0'}
-              theme={t}
-              label="Actual"
-              showLegend
-            />
-          </div>
-          <div style={s.equipStats}>
-            <div style={s.equipStat}>
-              <div style={s.equipStatLabel}>Actual Produced Qty</div>
-              <div style={s.equipStatValue}>{Math.round(Number(ar.actual) || 0)}</div>
-              <div style={s.equipStatUnit}>units</div>
-            </div>
-            <div style={s.equipStatDivider} />
-            <div style={s.equipStat}>
-              <div style={s.equipStatLabel}>Total Planned Quantity</div>
-              <div style={s.equipStatValue}>{Math.round(Number(ar.planned) || 0)}</div>
-              <div style={s.equipStatUnit}>units</div>
-            </div>
+      body: !at.has_plan ? (
+        <div style={{
+          ...s.tileBody,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: 180,
+          color: t.textMuted,
+          fontSize: 15,
+          fontWeight: 700,
+        }}>
+          No plan
+        </div>
+      ) : (
+        <div style={s.tileBody}>
+          <AnimatedBarChart
+            data={todayShiftBars.map((sh) => ({
+              name: sh.name,
+              pct: sh.pct == null ? 0 : sh.pct,
+            }))}
+            theme={t}
+            series={[{ key: 'pct', label: 'Achievement %', color: '#22c55e' }]}
+            yDomain={[0, 100]}
+            yLabel="Achievement %"
+            xLabel="Shift"
+            height={220}
+            showLegend
+          />
+          <div style={{
+            display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8, padding: '0 8px 8px',
+            fontSize: 11, fontWeight: 700, color: t.textDim,
+          }}>
+            {todayShiftBars.map((sh) => (
+              <span key={sh.id || sh.name}>
+                {sh.name}: {sh.has_plan
+                  ? `${Math.round(Number(sh.pct) || 0)}% (${Math.round(sh.actual || 0)}/${Math.round(sh.planned || 0)})`
+                  : 'No plan'}
+              </span>
+            ))}
           </div>
         </div>
       ),
@@ -189,6 +216,112 @@ export default function ImmFactoryDashboard() {
             yLabel="Running Rate %"
             onLineClick={(ln) => navigate(`/imm/zone/${encodeURIComponent(ln.id)}`)}
           />
+        </div>
+      ),
+    },
+    {
+      id: 'energyMeter',
+      style: cardShell,
+      header: <h3 style={s.cardTitle}>Plant Energy Meter</h3>,
+      body: (
+        <div style={{
+          ...s.tileBody,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 10,
+          padding: '8px 12px 12px',
+          justifyContent: 'center',
+          overflow: 'auto',
+        }}>
+          {[
+            ['Total_Active_Energy', 'kWh', em.Total_Active_Energy],
+            ['Total_Appearent_Energy', 'kVAh', em.Total_Appearent_Energy],
+            ['Total_Reactive_Energy', 'kVARh', em.Total_Reactive_Energy],
+          ].map(([key, unit, v]) => {
+            const raw = v?.value_text ?? (v?.value_num != null ? v.value_num : null);
+            let display = '—';
+            if (raw != null && raw !== '') {
+              const n = Number(raw);
+              display = Number.isFinite(n)
+                ? n.toLocaleString('en-US', { maximumFractionDigits: 3 })
+                : String(raw);
+            }
+            return (
+              <div
+                key={key}
+                style={{
+                  background: isDark ? (t.surface2 || '#1e293b') : '#f1f5f9',
+                  borderRadius: 8,
+                  padding: '10px 12px',
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 700, color: t.textMuted }}>
+                  {key}
+                  <span style={{ fontWeight: 600, color: t.textDim }}> ({unit})</span>
+                </div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: t.accent || '#0ea5e9', marginTop: 4 }}>
+                  {display === '—' ? '—' : `${display} ${unit}`}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ),
+    },
+    {
+      id: 'planAchieve',
+      style: cardShell,
+      header: (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px 4px', gap: 8 }}>
+          <h3 style={{ ...s.cardTitle, padding: 0 }}>
+            Plan Achievement ({stripCjk(ar.shift_name || 'current shift')})
+          </h3>
+          {(ar.shift_start || ar.shift_end) && (
+            <span style={{ fontSize: 11, fontWeight: 700, color: t.textDim, whiteSpace: 'nowrap' }}>
+              {ar.shift_start}–{ar.shift_end}
+            </span>
+          )}
+        </div>
+      ),
+      body: !ar.has_plan ? (
+        <div style={{
+          ...s.tileBodyRow,
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: 180,
+          color: t.textMuted,
+          fontSize: 15,
+          fontWeight: 700,
+        }}>
+          No plan
+        </div>
+      ) : (
+        <div style={s.tileBodyRow}>
+          <div style={s.tileBodyFlex}>
+            <OverviewDonutGauge
+              key={`ar-${ar.pct}-${ar.planned}-${ar.shift_id}`}
+              value={Math.round(Number(ar.pct) || 0)}
+              useHeatMap
+              size={200}
+              trackColor={isDark ? (t.surface2 || '#1e293b') : '#e2e8f0'}
+              theme={t}
+              label="Actual"
+              showLegend
+            />
+          </div>
+          <div style={s.equipStats}>
+            <div style={s.equipStat}>
+              <div style={s.equipStatLabel}>Actual Produced Qty</div>
+              <div style={s.equipStatValue}>{Math.round(Number(ar.actual) || 0)}</div>
+              <div style={s.equipStatUnit}>units</div>
+            </div>
+            <div style={s.equipStatDivider} />
+            <div style={s.equipStat}>
+              <div style={s.equipStatLabel}>Total Planned Quantity</div>
+              <div style={s.equipStatValue}>{Math.round(Number(ar.planned) || 0)}</div>
+              <div style={s.equipStatUnit}>units</div>
+            </div>
+          </div>
         </div>
       ),
     },
@@ -250,7 +383,7 @@ export default function ImmFactoryDashboard() {
       {err && <div style={s.alert}>{err}</div>}
       {data?.zones_hint && !zones.length && <div style={s.hint}>{stripCjk(data.zones_hint)}</div>}
 
-      <FreeformTileBoard tiles={tiles} theme={t} minBoardHeight={560} resetRef={resetTilesRef} />
+      <FreeformTileBoard tiles={tiles} theme={t} minBoardHeight={620} resetRef={resetTilesRef} />
 
       <section className={surfaceClass(t)} style={{ ...s.card, ...s.statusCard }}>
         <div style={s.sectionHead}>

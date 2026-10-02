@@ -1,27 +1,96 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-const STORAGE_KEY = 'immFactoryOverview.freeTiles.v3';
+/** Bump when default grid changes so browsers drop broken saved layouts. */
+const LAYOUT_VERSION = 6;
+const STORAGE_KEY = `immFactoryOverview.freeTiles.v${LAYOUT_VERSION}`;
 
 /**
- * Default reset layout — matches Factory Overview screenshot:
- * Plan Achievement | Running Rate by Line
- * Achievement by Line | Overall Utilization
+ * Default 3×2 grid — gaps between cells, no overlap:
+ * Row 1: Plan Achievement (Today) | Hourly Running Rate | Plant Energy Meter
+ * Row 2: Plan Achievement (shift) | Achievement by Zone | Overall Utilization
  */
 export const DEFAULT_LAYOUT = {
-  planAchieve: { x: 0.008, y: 0.008, w: 0.486, h: 0.50 },
-  runningByLine: { x: 0.506, y: 0.008, w: 0.486, h: 0.50 },
-  achieveByLine: { x: 0.008, y: 0.516, w: 0.486, h: 0.476 },
-  overallUtil: { x: 0.506, y: 0.516, w: 0.486, h: 0.476 },
+  planAchieveToday: { x: 0.00, y: 0.00, w: 0.325, h: 0.485 },
+  runningByLine: { x: 0.3375, y: 0.00, w: 0.325, h: 0.485 },
+  energyMeter: { x: 0.675, y: 0.00, w: 0.325, h: 0.485 },
+  planAchieve: { x: 0.00, y: 0.515, w: 0.325, h: 0.485 },
+  achieveByLine: { x: 0.3375, y: 0.515, w: 0.325, h: 0.485 },
+  overallUtil: { x: 0.675, y: 0.515, w: 0.325, h: 0.485 },
 };
 
+const TILE_IDS = Object.keys(DEFAULT_LAYOUT);
+
+function rectsOverlap(a, b, gap = 0.004) {
+  return !(
+    a.x + a.w + gap <= b.x
+    || b.x + b.w + gap <= a.x
+    || a.y + a.h + gap <= b.y
+    || b.y + b.h + gap <= a.y
+  );
+}
+
+function layoutHasOverlap(layout) {
+  const rects = TILE_IDS.map((id) => layout[id]).filter(Boolean);
+  for (let i = 0; i < rects.length; i += 1) {
+    for (let j = i + 1; j < rects.length; j += 1) {
+      if (rectsOverlap(rects[i], rects[j])) return true;
+    }
+  }
+  return false;
+}
+
+function clearLegacyLayouts() {
+  try {
+    for (let v = 1; v < LAYOUT_VERSION; v += 1) {
+      localStorage.removeItem(`immFactoryOverview.freeTiles.v${v}`);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 function loadLayout() {
+  clearLegacyLayouts();
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_LAYOUT };
     const parsed = JSON.parse(raw);
-    return { ...DEFAULT_LAYOUT, ...parsed };
+    if (!parsed || typeof parsed !== 'object' || parsed._version !== LAYOUT_VERSION) {
+      return { ...DEFAULT_LAYOUT };
+    }
+    const merged = { ...DEFAULT_LAYOUT };
+    TILE_IDS.forEach((id) => {
+      const p = parsed[id];
+      if (
+        p
+        && typeof p.x === 'number'
+        && typeof p.y === 'number'
+        && typeof p.w === 'number'
+        && typeof p.h === 'number'
+      ) {
+        merged[id] = {
+          x: Math.max(0, Math.min(1, p.x)),
+          y: Math.max(0, Math.min(1, p.y)),
+          w: Math.max(0.2, Math.min(1, p.w)),
+          h: Math.max(0.2, Math.min(1, p.h)),
+        };
+      }
+    });
+    if (layoutHasOverlap(merged)) return { ...DEFAULT_LAYOUT };
+    return merged;
   } catch {
     return { ...DEFAULT_LAYOUT };
+  }
+}
+
+function persistLayout(layout) {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ ...layout, _version: LAYOUT_VERSION }),
+    );
+  } catch {
+    /* ignore */
   }
 }
 
@@ -38,7 +107,6 @@ export default function FreeformTileBoard({
   resetRef,
 }) {
   const boardRef = useRef(null);
-  // Lazy init: pass a function so React calls loadLayout once (not on every render).
   const [layout, setLayout] = useState(() => loadLayout());
   const [drag, setDrag] = useState(null);
   const [boardSize, setBoardSize] = useState({ w: 800, h: minBoardHeight });
@@ -59,20 +127,21 @@ export default function FreeformTileBoard({
   }, [minBoardHeight, fillHeight]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(layout));
-    } catch {
-      /* ignore */
-    }
+    persistLayout(layout);
   }, [layout]);
 
   const resetLayout = useCallback(() => {
-    setLayout({ ...DEFAULT_LAYOUT });
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_LAYOUT));
-    } catch {
-      /* ignore */
+    const next = { ...DEFAULT_LAYOUT };
+    setLayout(next);
+    persistLayout(next);
+  }, []);
+
+  // One-shot: if a previous broken layout slipped through, snap to default on mount.
+  useEffect(() => {
+    if (layoutHasOverlap(layout)) {
+      resetLayout();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on mount
   }, []);
 
   useEffect(() => {
@@ -85,7 +154,6 @@ export default function FreeformTileBoard({
     const dx = (e.clientX - drag.startX) / rect.width;
     const dy = (e.clientY - drag.startY) / rect.height;
     setLayout((prev) => {
-      // Same fallback as render — layout may omit ids until first drag (e.g. new tiles).
       const base = prev[drag.id] || DEFAULT_LAYOUT[drag.id] || {
         x: 0, y: 0, w: 0.45, h: 0.45,
       };
@@ -94,8 +162,8 @@ export default function FreeformTileBoard({
         cur.x = Math.max(0, Math.min(1 - cur.w, drag.ox + dx));
         cur.y = Math.max(0, Math.min(1 - cur.h, drag.oy + dy));
       } else {
-        cur.w = Math.max(0.28, Math.min(1 - cur.x, drag.ow + dx));
-        cur.h = Math.max(0.28, Math.min(1 - cur.y, drag.oh + dy));
+        cur.w = Math.max(0.22, Math.min(1 - cur.x, drag.ow + dx));
+        cur.h = Math.max(0.22, Math.min(1 - cur.y, drag.oh + dy));
       }
       return { ...prev, [drag.id]: cur };
     });
@@ -159,7 +227,7 @@ export default function FreeformTileBoard({
                 height,
                 zIndex: active ? 20 : 1,
                 boxSizing: 'border-box',
-                padding: 4,
+                padding: 6,
               }}
             >
               <div

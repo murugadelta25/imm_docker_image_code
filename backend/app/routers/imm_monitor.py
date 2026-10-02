@@ -16,10 +16,13 @@ from ..models import (
     ImmKpivThreshold,
     ImmMold,
     Machine,
+    ProductionPlan,
     Station,
+    ToolStock,
     get_db,
     now_ist,
 )
+from ..tool_service import serialize_tool
 from .machines import _compute_status
 
 router = APIRouter(prefix="/api/imm", tags=["imm-monitor"])
@@ -96,12 +99,13 @@ def _active_components(db: Session, machine_id: int) -> List[ImmKeyComponent]:
 
 
 def _map_imm_status(eap_imm_status: str, err_msgs: List[str] = None) -> dict:
-    """Map machine run state only (Motor/Heater → Running / Idle / Stop / Offline).
+    """Map machine run state (Motor/Heater + cycle activity → Available / Running / …).
 
     KPIV alerts must NOT override this — use `_map_kpiv_status` for process health.
     """
     mapping = {
         "running": {"key": "production", "label": "Running", "color": "#22c55e"},
+        "available": {"key": "available", "label": "Available", "color": "#3b82f6"},
         "alarm": {"key": "warning", "label": "Warning", "color": "#eab308"},
         "setting_change": {"key": "warning", "label": "Warning", "color": "#eab308"},
         "breakdown": {"key": "abnormal", "label": "Abnormal", "color": "#ef4444"},
@@ -116,8 +120,8 @@ def _map_kpiv_status(err_msgs: List[str], eap_imm_status: str = "") -> dict:
     """Separate KPIV / process health badge (not machine run state).
 
     - Abnormal: one or more KPIV alerts
-    - Running: no alerts and machine is running
-    - Normal: no alerts and machine is idle/offline/other
+    - Running: no alerts and machine is actively cycling
+    - Normal: no alerts and machine is available/idle/offline/other
     """
     if err_msgs:
         return {"key": "abnormal", "label": "Abnormal", "color": "#ef4444"}
@@ -302,8 +306,26 @@ def imm_overview(db: Session = Depends(get_db), _=Depends(get_current_user)):
         pass
 
     items = []
-    counts = {"total": 0, "production": 0, "idle": 0, "stop": 0, "warning": 0, "abnormal": 0, "offline": 0}
+    counts = {"total": 0, "production": 0, "available": 0, "idle": 0, "stop": 0, "warning": 0, "abnormal": 0, "offline": 0}
     makes = set()
+    active_molds = {
+        r.machine_id: r.mold_no
+        for r in db.query(ImmMold).filter(ImmMold.is_active == 1).all()
+    }
+
+    today = date.today()
+    planned_machine_ids = {
+        mid
+        for (mid,) in db.query(ProductionPlan.machine_id)
+        .filter(
+            ProductionPlan.plan_date == today,
+            ProductionPlan.machine_id.isnot(None),
+            ProductionPlan.status.in_(("pending", "running", "paused")),
+        )
+        .distinct()
+        .all()
+        if mid
+    }
 
     for m in machines:
         errs = _check_kpiv_alerts(db, m.id)
@@ -348,6 +370,9 @@ def imm_overview(db: Session = Depends(get_db), _=Depends(get_current_user)):
                 "kpiv_status_color": kpiv_st["color"],
                 "err_msgs": errs,
                 "opcua": opcua_hl,
+                "active_mold_no": active_molds.get(m.id),
+                "has_plan": m.id in planned_machine_ids,
+                "operator_name": None,
             }
         )
 
@@ -413,6 +438,11 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
     errs = _check_kpiv_alerts(db, machine_id)
     imm = _map_imm_status(live, errs)
     kpiv_st = _map_kpiv_status(errs, live)
+    master_map = _mold_master_map(db)
+    mold_master = [
+        serialize_tool(t)
+        for t in db.query(ToolStock).filter(ToolStock.active == 1).order_by(ToolStock.tool_name).all()
+    ]
 
     return {
         "machine": {
@@ -438,8 +468,9 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
             "kpiv_status_color": kpiv_st["color"],
             "err_msgs": errs,
         },
-        "active_mold": _serialize_mold(mold) if mold else None,
-        "molds": [_serialize_mold(x) for x in molds],
+        "active_mold": _serialize_mold(mold, master_map) if mold else None,
+        "molds": [_serialize_mold(x, master_map) for x in molds],
+        "mold_master": mold_master,
         "components": [_serialize_component(c) for c in components],
         "thresholds": [_serialize_threshold(t) for t in thresholds],
         "kpiv_tags": [
@@ -452,9 +483,47 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
     }
 
 
-def _serialize_mold(mold: ImmMold) -> dict:
+def _mold_master_map(db: Session) -> dict[str, dict]:
+    """Index ToolStock mold master by tool_name / tool_code (lower)."""
+    out = {}
+    for t in db.query(ToolStock).filter(ToolStock.active == 1).all():
+        ser = serialize_tool(t)
+        for key in (t.tool_name, t.tool_code):
+            if key:
+                out[str(key).strip().lower()] = ser
+    return out
+
+
+def _attach_master(mold_payload: dict, master_map: dict[str, dict]) -> dict:
+    key = (mold_payload.get("mold_no") or "").strip().lower()
+    master = master_map.get(key)
+    if not master:
+        return mold_payload
+    mold_payload["master"] = {
+        "tool_id": master.get("id"),
+        "tool_code": master.get("tool_code"),
+        "mold_name": master.get("mold_name") or master.get("tool_name"),
+        "part_no": master.get("effective_part_no") or master.get("part_no"),
+        "customer_name": master.get("customer_name"),
+        "rm_grade": master.get("rm_grade"),
+        "colour": master.get("colour"),
+        "standard_cavity": master.get("standard_cavity"),
+        "running_cavity": master.get("running_cavity"),
+        "standard_cycle_time": master.get("standard_cycle_time"),
+        "std_shot_weight": master.get("std_shot_weight"),
+        "std_part_weight": master.get("std_part_weight"),
+        "std_runner_weight": master.get("std_runner_weight"),
+        "target_per_shift": master.get("target_per_shift"),
+        "cavities": master.get("cavities") or [],
+        "active_cavity": master.get("active_cavity"),
+        "active_cavity_name": master.get("active_cavity_name"),
+    }
+    return mold_payload
+
+
+def _serialize_mold(mold: ImmMold, master_map: Optional[dict] = None) -> dict:
     maint = _maint_status(mold)
-    return {
+    payload = {
         "id": mold.id,
         "machine_id": mold.machine_id,
         "mold_no": mold.mold_no,
@@ -467,6 +536,9 @@ def _serialize_mold(mold: ImmMold) -> dict:
         "is_active": bool(mold.is_active),
         "notes": mold.notes,
     }
+    if master_map is not None:
+        return _attach_master(payload, master_map)
+    return payload
 
 
 def _serialize_component(c: ImmKeyComponent) -> dict:
@@ -511,6 +583,8 @@ def kpiv_series(
     hours: float = Query(1, ge=0.25, le=168),
     shift: Optional[str] = Query(None, description="Shift id (A/B/C) — filters to that shift window"),
     entry_date: Optional[date] = Query(None, description="Logical shift date (defaults to today IST)"),
+    since: Optional[datetime] = Query(None, description="Custom range start (ISO datetime)"),
+    until: Optional[datetime] = Query(None, description="Custom range end (ISO datetime)"),
     tag: Optional[str] = None,
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
@@ -521,12 +595,35 @@ def kpiv_series(
     _ensure_defaults(db, machine_id)
 
     now = now_ist()
-    until = now
-    since = now - timedelta(hours=hours)
+    if getattr(now, "tzinfo", None) is not None:
+        now = now.replace(tzinfo=None)
+    end_at = now
+    start_at = now - timedelta(hours=hours)
     range_mode = "hours"
     shift_meta = None
 
-    if shift:
+    def _naive(dt: Optional[datetime]) -> Optional[datetime]:
+        if dt is None:
+            return None
+        if getattr(dt, "tzinfo", None) is not None:
+            return dt.replace(tzinfo=None)
+        return dt
+
+    custom_since = _naive(since)
+    custom_until = _naive(until)
+
+    if custom_since is not None or custom_until is not None:
+        start_at = custom_since or (now - timedelta(hours=1))
+        end_at = custom_until or now
+        if end_at > now:
+            end_at = now
+        if start_at >= end_at:
+            raise HTTPException(400, "Custom range start must be before end")
+        # Cap custom window at 7 days
+        if (end_at - start_at) > timedelta(days=7):
+            raise HTTPException(400, "Custom range cannot exceed 7 days")
+        range_mode = "custom"
+    elif shift:
         from ..models import SiteConfig
         import json as _json
 
@@ -549,16 +646,16 @@ def kpiv_series(
         end_s = str(sh.get("end") or "20:00")
         sh_h, sh_m = [int(x) for x in start_s.split(":")[:2]]
         eh_h, eh_m = [int(x) for x in end_s.split(":")[:2]]
-        since = datetime(day.year, day.month, day.day, sh_h, sh_m, 0)
-        until = datetime(day.year, day.month, day.day, eh_h, eh_m, 0)
-        if until <= since:
+        start_at = datetime(day.year, day.month, day.day, sh_h, sh_m, 0)
+        end_at = datetime(day.year, day.month, day.day, eh_h, eh_m, 0)
+        if end_at <= start_at:
             # Overnight shift: ends next calendar day
-            until = until + timedelta(days=1)
+            end_at = end_at + timedelta(days=1)
         # Do not project into the future
-        if until > now:
-            until = now
-        if since > now:
-            since = now - timedelta(minutes=1)
+        if end_at > now:
+            end_at = now
+        if start_at > now:
+            start_at = now - timedelta(minutes=1)
         range_mode = "shift"
         shift_meta = {
             "id": sh.get("id"),
@@ -566,8 +663,8 @@ def kpiv_series(
             "start": start_s,
             "end": end_s,
             "entry_date": day.isoformat(),
-            "since": since.isoformat(),
-            "until": until.isoformat(),
+            "since": start_at.isoformat(),
+            "until": end_at.isoformat(),
         }
 
     tags = [tag] if tag else list(KPIV_TAGS)
@@ -576,10 +673,9 @@ def kpiv_series(
         q = db.query(ImmKpivSample).filter(
             ImmKpivSample.machine_id == machine_id,
             ImmKpivSample.tag == tg,
-            ImmKpivSample.recorded_at >= since,
+            ImmKpivSample.recorded_at >= start_at,
+            ImmKpivSample.recorded_at <= end_at,
         )
-        if range_mode == "shift":
-            q = q.filter(ImmKpivSample.recorded_at <= until)
         rows = q.order_by(ImmKpivSample.recorded_at.asc()).all()
         thr = (
             db.query(ImmKpivThreshold)
@@ -601,8 +697,8 @@ def kpiv_series(
         "mode": range_mode,
         "hours": hours if range_mode == "hours" else None,
         "shift": shift_meta,
-        "since": since.isoformat(),
-        "until": until.isoformat() if range_mode == "shift" else now.isoformat(),
+        "since": start_at.isoformat(),
+        "until": end_at.isoformat(),
     }
     return result
 
@@ -638,7 +734,11 @@ def list_molds(
     query = db.query(ImmMold).filter(ImmMold.machine_id == machine_id)
     if q:
         query = query.filter(ImmMold.mold_no.ilike(f"%{q}%"))
-    return [_serialize_mold(m) for m in query.order_by(ImmMold.is_active.desc(), ImmMold.mold_no).all()]
+    master_map = _mold_master_map(db)
+    return [
+        _serialize_mold(m, master_map)
+        for m in query.order_by(ImmMold.is_active.desc(), ImmMold.mold_no).all()
+    ]
 
 
 @router.post("/equipment/{machine_id}/molds")

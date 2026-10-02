@@ -584,11 +584,11 @@ class MachineKpiLog(Base):
 
 
 class ToolStock(Base):
-    """Tool / spare inventory — manual stock or synced from SAP."""
+    """Mold / tool inventory — manual stock or synced from SAP (IMM mold master)."""
     __tablename__ = "tool_stocks"
     id = Column(Integer, primary_key=True, index=True)
     tool_code = Column(String(100), unique=True, nullable=False)
-    tool_name = Column(String(255), nullable=False)
+    tool_name = Column(String(255), nullable=False)  # Mold name
     unit = Column(String(20), default="pcs")
     stock_qty = Column(Numeric(12, 2), default=0)
     min_stock = Column(Numeric(12, 2), default=0)
@@ -603,6 +603,20 @@ class ToolStock(Base):
     tool_status = Column(String(30), default="ok")  # ok | near_eol | eol | correction_ack | blocked
     qr_code = Column(String(100))  # mapped for future QR scan; scan suppressed for now
     notes = Column(Text)
+    # IMM mold production master fields
+    part_no = Column(String(100))
+    standard_cavity = Column(Integer)
+    running_cavity = Column(Integer)
+    customer_name = Column(String(150))
+    rm_grade = Column(String(100))
+    standard_cycle_time = Column(Numeric(12, 4))
+    std_shot_weight = Column(Numeric(14, 4))
+    std_part_weight = Column(Numeric(14, 4))
+    std_runner_weight = Column(Numeric(14, 4))
+    colour = Column(String(80))
+    target_per_shift = Column(Integer)
+    # Multi-cavity fixtures: [{id,name,enabled,part_no}]
+    cavities_json = Column(Text)
     active = Column(Integer, default=1)
     created_at = Column(TIMESTAMP)
     updated_at = Column(TIMESTAMP)

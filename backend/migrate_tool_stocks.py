@@ -9,6 +9,18 @@ TOOL_STOCK_COLS = {
     "cycles_per_part": "DECIMAL(10,4) NULL DEFAULT 1",
     "tool_status": "VARCHAR(30) NULL DEFAULT 'ok'",
     "qr_code": "VARCHAR(100) NULL",
+    "part_no": "VARCHAR(100) NULL",
+    "standard_cavity": "INT NULL",
+    "running_cavity": "INT NULL",
+    "customer_name": "VARCHAR(150) NULL",
+    "rm_grade": "VARCHAR(100) NULL",
+    "standard_cycle_time": "DECIMAL(12,4) NULL",
+    "std_shot_weight": "DECIMAL(14,4) NULL",
+    "std_part_weight": "DECIMAL(14,4) NULL",
+    "std_runner_weight": "DECIMAL(14,4) NULL",
+    "colour": "VARCHAR(80) NULL",
+    "target_per_shift": "INT NULL",
+    "cavities_json": "TEXT NULL",
 }
 
 

@@ -4,6 +4,7 @@ export function statusPalette(isDark) {
   if (isDark) {
     return {
       running: { color: '#34d399', bg: 'rgba(16,185,129,0.28)', border: '#34d399' },
+      available: { color: '#60a5fa', bg: 'rgba(59,130,246,0.28)', border: '#60a5fa' },
       idle: { color: '#22d3ee', bg: 'rgba(34,211,238,0.22)', border: '#22d3ee' },
       stop: { color: '#f87171', bg: 'rgba(239,68,68,0.28)', border: '#f87171' },
       breakdown: { color: '#f87171', bg: 'rgba(239,68,68,0.28)', border: '#f87171' },
@@ -14,6 +15,7 @@ export function statusPalette(isDark) {
   }
   return {
     running: { color: '#047857', bg: '#d1fae5', border: '#059669' },
+    available: { color: '#1d4ed8', bg: '#dbeafe', border: '#3b82f6' },
     idle: { color: '#0e7490', bg: '#cffafe', border: '#06b6d4' },
     stop: { color: '#b91c1c', bg: '#fee2e2', border: '#dc2626' },
     breakdown: { color: '#b91c1c', bg: '#fee2e2', border: '#dc2626' },
@@ -25,6 +27,7 @@ export function statusPalette(isDark) {
 
 export const STATUS_ROWS = [
   ['running', 'Running'],
+  ['available', 'Available'],
   ['idle', 'Idle'],
   ['stop', 'Stop'],
   ['breakdown', 'Breakdown'],

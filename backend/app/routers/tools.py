@@ -17,6 +17,7 @@ from ..tool_service import (
     refresh_tool_status,
     build_forecast,
     find_tool,
+    dump_cavities,
 )
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -36,6 +37,18 @@ class ToolStockCreate(BaseModel):
     cycles_per_part: Optional[float] = 1
     qr_code: Optional[str] = None
     notes: Optional[str] = None
+    part_no: Optional[str] = None
+    standard_cavity: Optional[int] = None
+    running_cavity: Optional[int] = None
+    customer_name: Optional[str] = None
+    rm_grade: Optional[str] = None
+    standard_cycle_time: Optional[float] = None
+    std_shot_weight: Optional[float] = None
+    std_part_weight: Optional[float] = None
+    std_runner_weight: Optional[float] = None
+    colour: Optional[str] = None
+    target_per_shift: Optional[int] = None
+    cavities: Optional[List[dict]] = None
     active: Optional[int] = 1
 
 
@@ -52,6 +65,18 @@ class ToolStockUpdate(BaseModel):
     cycles_per_part: Optional[float] = None
     qr_code: Optional[str] = None
     notes: Optional[str] = None
+    part_no: Optional[str] = None
+    standard_cavity: Optional[int] = None
+    running_cavity: Optional[int] = None
+    customer_name: Optional[str] = None
+    rm_grade: Optional[str] = None
+    standard_cycle_time: Optional[float] = None
+    std_shot_weight: Optional[float] = None
+    std_part_weight: Optional[float] = None
+    std_runner_weight: Optional[float] = None
+    colour: Optional[str] = None
+    target_per_shift: Optional[int] = None
+    cavities: Optional[List[dict]] = None
     active: Optional[int] = None
 
 
@@ -523,6 +548,18 @@ def create_tool(
         qr_code=qr,
         tool_status="ok",
         notes=data.notes,
+        part_no=(data.part_no or "").strip() or None,
+        standard_cavity=data.standard_cavity,
+        running_cavity=data.running_cavity,
+        customer_name=(data.customer_name or "").strip() or None,
+        rm_grade=(data.rm_grade or "").strip() or None,
+        standard_cycle_time=data.standard_cycle_time,
+        std_shot_weight=data.std_shot_weight,
+        std_part_weight=data.std_part_weight,
+        std_runner_weight=data.std_runner_weight,
+        colour=(data.colour or "").strip() or None,
+        target_per_shift=data.target_per_shift,
+        cavities_json=dump_cavities(data.cavities),
         active=1 if data.active is None else int(data.active),
         created_at=now,
         updated_at=now,
@@ -551,8 +588,14 @@ def update_tool(
     if "stock_source" in payload and payload["stock_source"] not in (None, "manual", "sap"):
         raise HTTPException(400, "stock_source must be manual or sap")
     old_stock = float(t.stock_qty or 0)
+    if "cavities" in payload:
+        cavities = payload.pop("cavities")
+        payload["cavities_json"] = dump_cavities(cavities)
     for key, val in payload.items():
-        if key in ("tool_name", "sap_material_no", "notes", "unit", "qr_code") and isinstance(val, str):
+        if key in (
+            "tool_name", "sap_material_no", "notes", "unit", "qr_code",
+            "part_no", "customer_name", "rm_grade", "colour",
+        ) and isinstance(val, str):
             val = val.strip() or None
         setattr(t, key, val)
     t.updated_at = now_ist()

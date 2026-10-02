@@ -92,9 +92,9 @@ export default function AnimatedBarChart({
         <BarChart
           data={data}
           margin={{
-            top: labelKey ? 22 : 8,
+            top: labelKey ? 22 : (showLegend ? 8 : 8),
             right: 8,
-            left: hideY ? 0 : 4,
+            left: hideY ? 0 : (yLabel ? 18 : 4),
             bottom: hideX ? 0 : (xLabel ? 8 : 20),
           }}
           barCategoryGap={barCategoryGap}
@@ -144,9 +144,9 @@ export default function AnimatedBarChart({
             }}
           />
         )}
-        {resolvedSeries.map((s) => (
+        {resolvedSeries.map((s, i) => (
           <Bar
-            key={s.key}
+            key={`bar-${String(s.key)}-${i}`}
             dataKey={s.key}
             name={s.label}
             fill={`url(#${uid}-fill-${s.key})`}

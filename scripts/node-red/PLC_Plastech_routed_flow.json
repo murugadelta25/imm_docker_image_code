@@ -1,0 +1,219 @@
+[
+    {
+        "id": "dcd1ff4abbc62ba8",
+        "type": "tab",
+        "label": "Flow 3 — PLC Plastech routed",
+        "disabled": false,
+        "info": "Routes SIE EDA trx by payload.trx.name: IMM17/IMM18 (machines), PowerFactor, Total_enery_cumulative, EM_Current, EM_Voltage."
+    },
+    {
+        "id": "28778a3f76848bc9",
+        "type": "broker-config",
+        "name": "SIE",
+        "host": "rabbitmq.eda",
+        "port": "5672",
+        "vhost": "",
+        "tls": false,
+        "credsFromSettings": false
+    },
+    {
+        "id": "2363773220f33bf8",
+        "type": "sie-device-data",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "PLC_Plastech",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.trx.#.a916642e-1be4-4f54-a9ae-da2a4d074e91.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "a916642e-1be4-4f54-a9ae-da2a4d074e91",
+        "x": 120,
+        "y": 280,
+        "wires": [
+            [
+                "a1b2c3d4e5f60001"
+            ]
+        ]
+    },
+    {
+        "id": "a1b2c3d4e5f60001",
+        "type": "function",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "Route by trx.name",
+        "func": "const raw = msg.payload;\nif (!raw || !raw.trx) {\n    return null;\n}\n\nconst trxName = String(raw.trx.name || \"\").trim();\nconst body = raw.trx.body || {};\n\nconst values = {};\nfor (const [k, v] of Object.entries(body)) {\n    if (v === \"true\" || v === \"false\") {\n        values[k] = v === \"true\";\n    } else if (v !== \"\" && v !== null && !isNaN(Number(v))) {\n        values[k] = Number(v);\n    } else {\n        values[k] = v;\n    }\n}\n\nconst normalized = {\n    stream: trxName,\n    device: raw.device,\n    messageId: raw.id,\n    ts: raw.ts,\n    origin: raw.origin,\n    values\n};\n\nconst routeIndex = {\n    \"IMM17\": 0,\n    \"IMM18\": 1,\n    \"PowerFactor\": 2,\n    \"Total_enery_cumulative\": 3,\n    \"EM_Current\": 4,\n    \"EM_Voltage\": 5\n};\n\nlet outIdx = routeIndex[trxName];\n\nif (outIdx === undefined) {\n    if (/^IMM\\d+$/i.test(trxName)) {\n        outIdx = 6;\n        normalized.category = \"machine\";\n        normalized.machineId = trxName.toUpperCase();\n    } else {\n        node.warn(\"Unknown trx.name: \" + trxName);\n        return null;\n    }\n} else if (outIdx <= 1) {\n    normalized.category = \"machine\";\n    normalized.machineId = trxName.toUpperCase();\n} else {\n    normalized.category = \"energy\";\n    const energyMap = {\n        2: \"power_factor\",\n        3: \"total_energy_cumulative\",\n        4: \"em_current\",\n        5: \"em_voltage\"\n    };\n    normalized.energyType = energyMap[outIdx];\n}\n\nif (normalized.category === \"machine\") {\n    const canon = {};\n    for (const [k, v] of Object.entries(values)) {\n        const lk = k.toLowerCase();\n        if (lk.includes(\"heater\")) canon.heater_status = v;\n        else if (lk.includes(\"motor\")) canon.motor_status = v;\n        else if (lk.includes(\"refill\")) canon.refilling = v;\n        else if (lk.includes(\"injection\")) canon.injection_status = v;\n    }\n    normalized.status = canon;\n}\n\nmsg.topic = trxName;\nmsg.payload = normalized;\n\nconst outputs = [null, null, null, null, null, null, null];\noutputs[outIdx] = msg;\nreturn outputs;",
+        "outputs": 7,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 370,
+        "y": 280,
+        "wires": [
+            [
+                "dbg_imm17"
+            ],
+            [
+                "dbg_imm18"
+            ],
+            [
+                "dbg_pf"
+            ],
+            [
+                "dbg_energy"
+            ],
+            [
+                "dbg_current"
+            ],
+            [
+                "dbg_voltage"
+            ],
+            [
+                "dbg_imm_other"
+            ]
+        ]
+    },
+    {
+        "id": "dbg_imm17",
+        "type": "debug",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "Machine — IMM17",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 640,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "dbg_imm18",
+        "type": "debug",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "Machine — IMM18",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 640,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "dbg_pf",
+        "type": "debug",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "Energy — PowerFactor",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 660,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "dbg_energy",
+        "type": "debug",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "Energy — Total_enery_cumulative",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 700,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "dbg_current",
+        "type": "debug",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "Energy — EM_Current",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 660,
+        "y": 320,
+        "wires": []
+    },
+    {
+        "id": "dbg_voltage",
+        "type": "debug",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "Energy — EM_Voltage",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 660,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "dbg_imm_other",
+        "type": "debug",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "Machine — other IMMxx",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 670,
+        "y": 440,
+        "wires": []
+    },
+    {
+        "id": "0662f30d5b99b9e6",
+        "type": "debug",
+        "z": "dcd1ff4abbc62ba8",
+        "name": "RAW (disable when routed)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 390,
+        "y": 360,
+        "wires": []
+    }
+]

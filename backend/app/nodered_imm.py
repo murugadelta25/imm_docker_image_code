@@ -16,11 +16,15 @@ NODE_RED_URL = os.getenv("NODE_RED_URL", "http://127.0.0.1:1880").rstrip("/")
 WEBHOOK_SECRET = os.getenv("NODE_RED_WEBHOOK_SECRET", "").strip()
 
 # SIE device UUID → friendly label (matches flows.json IMM_xx nodes)
+# Note: PLC_Plastech (a916642e-…) carries IMM17/IMM18 + plant energy on one device —
+# Node-RED must set machine_name / machine_id from trx.name before push.
 DEVICE_LABELS: Dict[str, str] = {
     "b695f76c-457a-4742-89d3-8950cc1f38a2": "IMM_07",
-    "39ee125e-fa64-45c2-a92d-7dcf3990896f": "IMM_08",
-    "7c0cee0d-1466-49da-830f-bb0447870286": "IMM_09",
-    "7e9ab0d8-70bf-423a-be18-d4829c8dcdc5": "IMM_10",
+    "279cb5fc-18b1-4b7a-8e0c-fde9fc1e8fdf": "IMM_08",
+    "69a56343-e331-4165-85a4-ebcc754d1f84": "IMM_09",
+    "3a678f1d-1a26-4c2f-a208-a59efbbfd522": "IMM_10",
+    "e3d7ca17-9f75-43fb-b8c4-c2b389245f63": "IMM_11",
+    "a916642e-1be4-4f54-a9ae-da2a4d074e91": "PLC_Plastech",
 }
 
 
@@ -56,12 +60,30 @@ def fetch_device(device_id: str) -> Optional[dict]:
 
 def parameters_to_samples(parameters: Dict[str, Any]) -> List[dict]:
     samples = []
+    # SIE cumulative totals ↔ catalog Energy_Shift_* aliases (either side may arrive)
+    aliases = {
+        "Total_Active_Energy": "Energy_Shift_Kwh",
+        "Total_Appearent_Energy": "Energy_Shift_Kvah",
+        "Total_Apparent_Energy": "Energy_Shift_Kvah",
+        "Total_Reactive_Energy": "Energy_Shift_Kvarh",
+        "Energy_Shift_Kwh": "Total_Active_Energy",
+        "Energy_Shift_Kvah": "Total_Appearent_Energy",
+        "Energy_Shift_Kvarh": "Total_Reactive_Energy",
+    }
+    seen = set()
     for key, val in (parameters or {}).items():
         if key in ("device", "trx", "body", "id", "origin"):
             continue
         if val is None or val == "":
             continue
-        samples.append({"param_key": str(key), "value": val, "quality": "good"})
+        k = str(key)
+        if k not in seen:
+            samples.append({"param_key": k, "value": val, "quality": "good"})
+            seen.add(k)
+        alt = aliases.get(k)
+        if alt and alt not in seen:
+            samples.append({"param_key": alt, "value": val, "quality": "good"})
+            seen.add(alt)
     return samples
 
 
