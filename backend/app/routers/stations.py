@@ -89,6 +89,8 @@ def get_station_machines(station_id: int, db: Session = Depends(get_db),
     if not s:
         raise HTTPException(404, "Station not found")
 
+    from ..energy_meter import is_energy_utility_machine
+
     machines = db.query(Machine).filter(Machine.station_id == station_id).order_by(Machine.id).all()
     return [
         {
@@ -100,4 +102,5 @@ def get_station_machines(station_id: int, db: Session = Depends(get_db),
             "status": m.status,
         }
         for m in machines
+        if not is_energy_utility_machine(m)
     ]

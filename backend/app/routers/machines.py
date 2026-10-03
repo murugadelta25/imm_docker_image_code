@@ -281,15 +281,25 @@ def _machine_public_dict(m: Machine, station: Optional[Station] = None, live_sta
 
 
 @router.get("/")
-def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """List machines with live display status.
+def list_machines(
+    include_energy: bool = False,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """List production machines with live display status.
+
+    Energy / utility tag hosts (EM_PLANT, machine_type ENERGY|UTILITY) are excluded
+    by default — they are not production machines. Pass include_energy=true only for admin tooling.
 
     Important: do NOT write status-log / deviation hooks on every GET — Dashboard and
     other pages poll this endpoint and that side-effect path can exceed client timeouts.
     """
+    from ..energy_meter import is_energy_utility_machine
     from ..operator_presence import get_live_operator_map, operator_fields_for_machine
 
     machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    if not include_energy:
+        machines = [m for m in machines if not is_energy_utility_machine(m)]
     stations = {s.id: s for s in db.query(Station).all()}
     op_map = get_live_operator_map(db)
     result = []
@@ -310,10 +320,14 @@ def get_station_numbers(db: Session = Depends(get_db), _=Depends(get_current_use
 
 @router.get("/fleet")
 def get_fleet(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """Returns all machines with live computed status grouped by station."""
+    """Returns production machines with live computed status (excludes energy utilities)."""
+    from ..energy_meter import is_energy_utility_machine
     from ..operator_presence import get_live_operator_map, operator_fields_for_machine
 
-    machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    machines = [
+        m for m in db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+        if not is_energy_utility_machine(m)
+    ]
     stations = {s.id: s for s in db.query(Station).all()}
     op_map = get_live_operator_map(db)
     result = []

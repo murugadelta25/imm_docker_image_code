@@ -111,7 +111,7 @@ def build_oee_xlsx(db: Session, report_date=None) -> bytes:
     amb_font  = Font(bold=True, color="D97706")
 
     headers = ["Date","Station","Machine","Shift","Work Order","Model / Variant",
-               "Current Operation","Next Operation","CT (sec)",
+               "Running Cavity","Shot Counts","CT (sec)",
                "Avail (min)","Op Time (min)","Plan Qty","Possible Qty","Actual Qty",
                "Prod Loss","Accepted Qty","Defect Qty",
                "AR%","PR%","QR%","OEE%",
@@ -138,11 +138,16 @@ def build_oee_xlsx(db: Session, report_date=None) -> bytes:
         qr_raw = float(e.qr_raw or 0) if e.qr_raw is not None else None
         oee_raw = float(e.oee_raw or 0) if e.oee_raw is not None else None
         plan_qty = e.planned_qty if e.planned_qty is not None else ""
+        run_cav = getattr(e, "running_cavity", None)
+        shots = getattr(e, "shot_count", None)
+        if shots is None and run_cav and int(run_cav or 0) > 0:
+            shots = int((e.actual_qty or 0) // int(run_cav))
         ws.append([
             str(e.entry_date), e.station_name or str(e.station_no or ""),
             e.machine_name or "",
             e.shift, e.work_order_no or "", e.model_variant or "",
-            e.current_operation, e.next_operation,
+            run_cav if run_cav is not None else "",
+            shots if shots is not None else "",
             ct, e.available_shift_time, e.operating_time,
             plan_qty, e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,

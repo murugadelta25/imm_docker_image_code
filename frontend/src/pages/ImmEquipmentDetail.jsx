@@ -210,15 +210,15 @@ export default function ImmEquipmentDetail() {
     const v = row.value_text ?? row.value_num;
     return v == null || v === '' ? null : v;
   }, [opcuaByKey]);
-  const fmt = useCallback((key, unit = '') => {
+  const fmt = useCallback((key) => {
     const v = pv(key);
     if (v == null) return '—';
     const n = Number(v);
-    const text = Number.isFinite(n)
+    return Number.isFinite(n)
       ? n.toLocaleString('en-US', { maximumFractionDigits: 3 })
       : stripCjk(String(v));
-    return unit ? `${text} ${unit}` : text;
   }, [pv]);
+  const labelIn = (label, unit) => (unit ? `${label} in ${unit}` : label);
   const isOn = useCallback((key) => {
     const v = String(pv(key) ?? '').trim().toLowerCase();
     return v === '1' || v === 'true' || v === 'on' || v === 'yes' || v === 'running';
@@ -230,11 +230,28 @@ export default function ImmEquipmentDetail() {
     return list.filter((m) => (m.mold_no || '').toLowerCase().includes(q));
   }, [detail, moldSearch]);
 
-  const overviewHeader = useMemo(() => ({
-    mold: stripCjk(pv('Actual_Mold_Name') || mold?.mold_no || mold?.master?.mold_name || '—'),
-    material: stripCjk(pv('Actual_Material_Name') || mold?.master?.rm_grade || '—'),
-    cavity: stripCjk(pv('Actual_Cavity_No') || mold?.master?.running_cavity || mold?.master?.active_cavity_name || '—'),
-  }), [pv, mold]);
+  const overviewHeader = useMemo(() => {
+    const isCode = (v) => /^\d+$/.test(String(v ?? '').trim());
+    const plcMold = pv('Actual_Mold_Name');
+    const catalog = detail?.mold_master || [];
+    const matched = catalog.find((t) => {
+      const code = String(plcMold ?? '').trim().toLowerCase();
+      if (!code) return false;
+      return [t.part_no, t.tool_code, t.effective_part_no]
+        .map((x) => String(x || '').trim().toLowerCase())
+        .includes(code);
+    });
+    const masterName = mold?.master?.mold_name
+      || (!isCode(mold?.mold_no) ? mold?.mold_no : null)
+      || matched?.mold_name
+      || matched?.tool_name
+      || null;
+    return {
+      mold: stripCjk(masterName || (!isCode(plcMold) ? plcMold : null) || mold?.mold_no || plcMold || '—'),
+      material: stripCjk(pv('Actual_Material_Name') || mold?.master?.rm_grade || '—'),
+      cavity: stripCjk(pv('Actual_Cavity_No') || mold?.master?.running_cavity || mold?.master?.active_cavity_name || '—'),
+    };
+  }, [pv, mold, detail?.mold_master]);
 
   const modeFlags = useMemo(() => ([
     { key: 'Auto_Mode', label: 'Auto Mode', on: isOn('Auto_Mode') },
@@ -244,55 +261,55 @@ export default function ImmEquipmentDetail() {
   ]), [isOn]);
 
   const prodCounts = useMemo(() => ([
-    { label: 'Prod Target Count', value: fmt('Production_Target_Count', 'Nos.') },
-    { label: 'Act Prod Count', value: fmt('Actual_Production_Count', 'Nos.') },
-    { label: 'Good Count', value: fmt('Total_Good_Count', 'Nos.') },
-    { label: 'Bad Count', value: fmt('Total_Bad_Count', 'Nos.') },
+    { label: labelIn('Prod Target Count', 'Nos.'), value: fmt('Production_Target_Count') },
+    { label: labelIn('Act Prod Count', 'Nos.'), value: fmt('Actual_Production_Count') },
+    { label: labelIn('Good Count', 'Nos.'), value: fmt('Total_Good_Count') },
+    { label: labelIn('Bad Count', 'Nos.'), value: fmt('Total_Bad_Count') },
   ]), [fmt]);
 
   const setActualRows = useMemo(() => ([
-    { setLabel: 'Last Cycle Time', setKey: 'Last_Cycle_Time', actLabel: 'Act. Cycle Time', actKey: 'Actual_Cycle_Time', unit: 'Sec' },
-    { setLabel: 'Set Nozzle Temp', setKey: 'Set_Nozzle_Temp', actLabel: 'Act Nozzle Temp', actKey: 'Actual_Nozzle_Temp', unit: '°C' },
-    { setLabel: 'Set Cyl. 1 Temp.', setKey: 'Set_Cylender_1_Temp', actLabel: 'Act Cyl. 1 Temp.', actKey: 'Actual_Cylender_1_Temp', unit: '°C' },
-    { setLabel: 'Set Cyl. 2 Temp.', setKey: 'Set_Cylender_2_Temp', actLabel: 'Act Cyl. 2 Temp.', actKey: 'Actual_Cylender_2_Temp', unit: '°C' },
-    { setLabel: 'Set Cyl. 3 Temp.', setKey: 'Set_Cylender_3_Temp', actLabel: 'Act Cyl. 3 Temp.', actKey: 'Actual_Cylender_3_Temp', unit: '°C' },
-    { setLabel: 'Set Cooling Time', setKey: 'Set_Cooling_Time', actLabel: 'Act Cooling Time', actKey: 'Actual_Cooling_Time', unit: 'Sec' },
-    { setLabel: 'Set Injection Time', setKey: 'Set_Injection_Time', actLabel: 'Act Injection Time', actKey: 'Actual_Injection_Time', unit: 'Sec' },
-    { setLabel: 'Set Clamp. Force', setKey: 'Set_Clamping_Force', actLabel: 'Act Clamp. Force', actKey: 'Actual_Clamping_Force', unit: 'Bar' },
+    { setLabel: labelIn('Last Cycle Time', 'Sec'), setKey: 'Last_Cycle_Time', actLabel: labelIn('Act. Cycle Time', 'Sec'), actKey: 'Actual_Cycle_Time' },
+    { setLabel: labelIn('Set Nozzle Temp', '°C'), setKey: 'Set_Nozzle_Temp', actLabel: labelIn('Act Nozzle Temp', '°C'), actKey: 'Actual_Nozzle_Temp' },
+    { setLabel: labelIn('Set Cyl. 1 Temp.', '°C'), setKey: 'Set_Cylender_1_Temp', actLabel: labelIn('Act Cyl. 1 Temp.', '°C'), actKey: 'Actual_Cylender_1_Temp' },
+    { setLabel: labelIn('Set Cyl. 2 Temp.', '°C'), setKey: 'Set_Cylender_2_Temp', actLabel: labelIn('Act Cyl. 2 Temp.', '°C'), actKey: 'Actual_Cylender_2_Temp' },
+    { setLabel: labelIn('Set Cyl. 3 Temp.', '°C'), setKey: 'Set_Cylender_3_Temp', actLabel: labelIn('Act Cyl. 3 Temp.', '°C'), actKey: 'Actual_Cylender_3_Temp' },
+    { setLabel: labelIn('Set Cooling Time', 'Sec'), setKey: 'Set_Cooling_Time', actLabel: labelIn('Act Cooling Time', 'Sec'), actKey: 'Actual_Cooling_Time' },
+    { setLabel: labelIn('Set Injection Time', 'Sec'), setKey: 'Set_Injection_Time', actLabel: labelIn('Act Injection Time', 'Sec'), actKey: 'Actual_Injection_Time' },
+    { setLabel: labelIn('Set Clamp. Force', 'Bar'), setKey: 'Set_Clamping_Force', actLabel: labelIn('Act Clamp. Force', 'Bar'), actKey: 'Actual_Clamping_Force' },
   ]), []);
 
   const paramPairs = useMemo(() => ([
     [
-      { label: 'Motor Status', key: 'Motor_Status', unit: '' },
-      { label: 'Heater Status', key: 'Heater_Status', unit: '' },
+      { label: 'Motor Status', key: 'Motor_Status' },
+      { label: 'Heater Status', key: 'Heater_Status' },
     ],
     [
-      { label: 'Act Charg. RPM', key: 'Actual_Charging_RPM', unit: 'RPM' },
-      { label: 'Oil Temperature', key: 'Actual_Machine_Oil_Temp', unit: '°C' },
+      { label: labelIn('Act Charg. RPM', 'RPM'), key: 'Actual_Charging_RPM' },
+      { label: labelIn('Oil Temperature', '°C'), key: 'Actual_Machine_Oil_Temp' },
     ],
     [
-      { label: 'Mould Open Time', key: 'Actual_Mold_Open_Time', unit: 'Sec' },
-      { label: 'Mould Close Time', key: 'Actual_Mold_Close_Time', unit: 'Sec' },
+      { label: labelIn('Mold Open Time', 'Sec'), key: 'Actual_Mold_Open_Time' },
+      { label: labelIn('Mold Close Time', 'Sec'), key: 'Actual_Mold_Close_Time' },
     ],
     [
-      { label: 'Act Eje Mode', key: 'Actual_Ejector_Mode', unit: '' },
-      { label: 'Act Eje Position', key: 'Actual_Ejector_Position', unit: 'mm' },
+      { label: 'Act Eje Mode', key: 'Actual_Ejector_Mode' },
+      { label: labelIn('Act Eje Position', 'mm'), key: 'Actual_Ejector_Position' },
     ],
     [
-      { label: 'Act Charg. Pos.', key: 'Actual_Charging_Position', unit: 'mm' },
-      { label: 'Act Charge Time', key: 'Actual_Charging_Time', unit: 'Sec' },
+      { label: labelIn('Act Charg. Pos.', 'mm'), key: 'Actual_Charging_Position' },
+      { label: labelIn('Act Charge Time', 'Sec'), key: 'Actual_Charging_Time' },
     ],
     [
-      { label: 'Act Back Press.', key: 'Actual_Back_Pressure', unit: 'Bar' },
-      { label: 'Act System Pres.', key: 'Actual_System_Pressure', unit: 'Bar' },
+      { label: labelIn('Act Back Press.', 'Bar'), key: 'Actual_Back_Pressure' },
+      { label: labelIn('Act System Pres.', 'Bar'), key: 'Actual_System_Pressure' },
     ],
     [
-      { label: 'Act System Flow', key: 'Actual_System_Flow', unit: '' },
-      { label: 'Lubrication Status', key: 'Auto_Lubrication_Status', unit: '' },
+      { label: 'Act System Flow', key: 'Actual_System_Flow' },
+      { label: 'Lubrication Status', key: 'Auto_Lubrication_Status' },
     ],
     [
-      { label: 'Set Hold Tran. Pos.', key: 'Set_Holding_Transfer_Position', unit: 'mm' },
-      { label: 'Inj Cushion Mon.Pos', key: 'Actual_Injection_Cusion_Monitoring_Position', unit: 'mm' },
+      { label: labelIn('Set Hold Tran. Pos.', 'mm'), key: 'Set_Holding_Transfer_Position' },
+      { label: labelIn('Inj Cushion Mon.Pos', 'mm'), key: 'Actual_Injection_Cusion_Monitoring_Position' },
     ],
   ]), []);
 
@@ -716,7 +733,7 @@ export default function ImmEquipmentDetail() {
 
         <div style={s.hmiHeaderRow}>
           <div style={s.hmiHeaderCell}>
-            <span style={s.hmiLabel}>Mould Name</span>
+            <span style={s.hmiLabel}>Mold name</span>
             <span style={s.hmiValue}>{overviewHeader.mold}</span>
           </div>
           <div style={s.hmiHeaderCell}>
@@ -771,13 +788,13 @@ export default function ImmEquipmentDetail() {
                 return (
                   <tr key={row.actKey} style={zebra}>
                     <td style={s.hmiTdLabel}>{row.setLabel}</td>
-                    <td style={s.hmiTdValue}>{fmt(row.setKey, row.unit)}</td>
+                    <td style={s.hmiTdValue}>{fmt(row.setKey)}</td>
                     <td style={s.hmiTdLabel}>{row.actLabel}</td>
-                    <td style={s.hmiTdValue}>{fmt(row.actKey, row.unit)}</td>
+                    <td style={s.hmiTdValue}>{fmt(row.actKey)}</td>
                     <td style={s.hmiTdLabel}>{left?.label || ''}</td>
-                    <td style={s.hmiTdValue}>{left ? fmt(left.key, left.unit) : ''}</td>
+                    <td style={s.hmiTdValue}>{left ? fmt(left.key) : ''}</td>
                     <td style={s.hmiTdLabel}>{right?.label || ''}</td>
-                    <td style={s.hmiTdValue}>{right ? fmt(right.key, right.unit) : ''}</td>
+                    <td style={s.hmiTdValue}>{right ? fmt(right.key) : ''}</td>
                   </tr>
                 );
               })}

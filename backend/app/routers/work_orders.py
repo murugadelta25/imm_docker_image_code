@@ -13,7 +13,7 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
 from ..auth import get_current_user, require_role
-from ..models import WorkOrder, ProductionPlan, Machine, Part, get_db, now_ist
+from ..models import WorkOrder, ProductionPlan, Machine, Part, ToolStock, get_db, now_ist
 from ..ws_manager import manager
 
 router = APIRouter(prefix="/api/work-orders", tags=["work-orders"])
@@ -27,11 +27,12 @@ class SpareToolItem(BaseModel):
     tool_no: Optional[str] = None
     stock_available: Optional[float] = None
     remaining_qty: Optional[float] = None
-    source: Optional[str] = None  # "part" | "manual"
+    source: Optional[str] = None  # "mold" | "part" | "manual"
 
 
 class WorkOrderCreate(BaseModel):
     work_order_no: str
+    mold_id: Optional[int] = None  # preferred for IMM — mold master (tool_stocks.id)
     part_id: Optional[int] = None
     model_variant: Optional[str] = None
     description: Optional[str] = None
@@ -47,7 +48,26 @@ class WorkOrderUpdate(BaseModel):
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     status: Optional[str] = None
+    mold_id: Optional[int] = None
+    part_id: Optional[int] = None
+    model_variant: Optional[str] = None
     spares_tools: Optional[List[SpareToolItem]] = None
+
+
+def _mold_label(mold: ToolStock) -> str:
+    bits = [mold.tool_code, mold.tool_name]
+    if getattr(mold, "part_no", None):
+        bits.append(str(mold.part_no))
+    return " · ".join(b for b in bits if b)
+
+
+def _resolve_part_id_from_mold(db: Session, mold: ToolStock) -> Optional[int]:
+    """Optional legacy link: match Part.part_no to mold.part_no when present."""
+    pn = (getattr(mold, "part_no", None) or "").strip()
+    if not pn:
+        return None
+    part = db.query(Part).filter(Part.part_no == pn).first()
+    return part.id if part else None
 
 
 class WorkOrderExportParams(BaseModel):
@@ -71,7 +91,7 @@ def _parse_spares(raw: Optional[str]) -> list:
 def _wo_stats(db: Session, wo: WorkOrder) -> dict:
     plans = db.query(ProductionPlan).filter(
         ProductionPlan.work_order_id == wo.id,
-        ProductionPlan.status != "cancelled",
+        ProductionPlan.status.notin_(["cancelled", "aborted"]),
     ).all()
     planned_qty = sum(p.planned_qty for p in plans)
     completed_qty = sum(p.actual_qty for p in plans)
@@ -90,13 +110,19 @@ def _wo_stats(db: Session, wo: WorkOrder) -> dict:
 
 def _serialize_wo(db: Session, wo: WorkOrder, include_plans: bool = False) -> dict:
     part = db.query(Part).filter(Part.id == wo.part_id).first() if wo.part_id else None
+    mold = db.query(ToolStock).filter(ToolStock.id == wo.mold_id).first() if getattr(wo, "mold_id", None) else None
     stats = _wo_stats(db, wo)
+    mold_label = _mold_label(mold) if mold else None
     out = {
         "id": wo.id,
         "work_order_no": wo.work_order_no,
+        "mold_id": getattr(wo, "mold_id", None),
+        "mold_code": mold.tool_code if mold else None,
+        "mold_name": mold.tool_name if mold else None,
+        "mold_label": mold_label,
         "part_id": wo.part_id,
-        "part_no": part.part_no if part else None,
-        "model_variant": wo.model_variant or (part.model_variant if part else None),
+        "part_no": (part.part_no if part else None) or (getattr(mold, "part_no", None) if mold else None),
+        "model_variant": wo.model_variant or mold_label or (part.model_variant if part else None),
         "description": wo.description,
         "target_qty": wo.target_qty,
         "start_date": str(wo.start_date) if wo.start_date else None,
@@ -193,15 +219,33 @@ async def create_work_order(
 ):
     if db.query(WorkOrder).filter(WorkOrder.work_order_no == data.work_order_no).first():
         raise HTTPException(400, "Work order number already exists")
-    if data.part_id:
-        part = db.query(Part).filter(Part.id == data.part_id).first()
+
+    mold = None
+    if data.mold_id:
+        mold = db.query(ToolStock).filter(ToolStock.id == data.mold_id, ToolStock.active == 1).first()
+        if not mold:
+            raise HTTPException(404, "Mold not found in mold master")
+    elif not data.part_id:
+        raise HTTPException(400, "Select a mold from mold master")
+
+    part_id = data.part_id
+    if part_id:
+        part = db.query(Part).filter(Part.id == part_id).first()
         if not part:
             raise HTTPException(404, "Part not found")
+    elif mold:
+        part_id = _resolve_part_id_from_mold(db, mold)
+
+    model_variant = data.model_variant
+    if not model_variant and mold:
+        model_variant = _mold_label(mold)
+
     spares_json = json.dumps([s.model_dump() for s in data.spares_tools]) if data.spares_tools else None
     wo = WorkOrder(
         work_order_no=data.work_order_no.strip(),
-        part_id=data.part_id,
-        model_variant=data.model_variant,
+        mold_id=data.mold_id,
+        part_id=part_id,
+        model_variant=model_variant,
         description=data.description,
         target_qty=data.target_qty,
         start_date=data.start_date,
@@ -234,11 +278,21 @@ def list_work_orders(
     q = db.query(WorkOrder)
     if search:
         like = f"%{search}%"
-        q = q.filter(or_(
+        mold_ids = [
+            r[0] for r in db.query(ToolStock.id).filter(or_(
+                ToolStock.tool_code.ilike(like),
+                ToolStock.tool_name.ilike(like),
+                ToolStock.part_no.ilike(like),
+            )).all()
+        ]
+        search_filters = [
             WorkOrder.work_order_no.ilike(like),
             WorkOrder.model_variant.ilike(like),
             WorkOrder.description.ilike(like),
-        ))
+        ]
+        if mold_ids:
+            search_filters.append(WorkOrder.mold_id.in_(mold_ids))
+        q = q.filter(or_(*search_filters))
     if status:
         q = q.filter(WorkOrder.status == status)
     if month:
@@ -345,10 +399,13 @@ def work_order_overview(
             })
 
         part = db.query(Part).filter(Part.id == wo.part_id).first() if wo.part_id else None
+        mold = db.query(ToolStock).filter(ToolStock.id == wo.mold_id).first() if getattr(wo, "mold_id", None) else None
         items.append({
             "id": wo.id,
             "work_order_no": wo.work_order_no,
-            "part_label": wo.model_variant or (part.part_no if part else "—"),
+            "mold_id": getattr(wo, "mold_id", None),
+            "mold_label": _mold_label(mold) if mold else None,
+            "part_label": wo.model_variant or (_mold_label(mold) if mold else None) or (part.part_no if part else "—"),
             "target_qty": wo.target_qty,
             "completed_qty": stats["completed_qty"],
             "remaining_qty": stats["remaining_qty"],
@@ -795,6 +852,22 @@ async def update_work_order(
         wo.end_date = data.end_date
     if data.status is not None:
         wo.status = data.status
+    if data.mold_id is not None:
+        if data.mold_id:
+            mold = db.query(ToolStock).filter(ToolStock.id == data.mold_id, ToolStock.active == 1).first()
+            if not mold:
+                raise HTTPException(404, "Mold not found in mold master")
+            wo.mold_id = mold.id
+            if data.part_id is None and not wo.part_id:
+                wo.part_id = _resolve_part_id_from_mold(db, mold)
+            if data.model_variant is None and not wo.model_variant:
+                wo.model_variant = _mold_label(mold)
+        else:
+            wo.mold_id = None
+    if data.part_id is not None:
+        wo.part_id = data.part_id or None
+    if data.model_variant is not None:
+        wo.model_variant = data.model_variant
     if data.spares_tools is not None:
         wo.spares_tools_json = json.dumps([s.model_dump() for s in data.spares_tools])
     wo.updated_at = now_ist()
@@ -803,6 +876,36 @@ async def update_work_order(
     db.refresh(wo)
     await manager.broadcast({"type": "work_order_updated", "work_order_id": wo_id})
     return _serialize_wo(db, wo, include_plans=True)
+
+
+@router.delete("/{wo_id}")
+async def delete_work_order(
+    wo_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("supervisor", "admin")),
+):
+    """Delete a work order. Linked plans/tool events are unlinked (kept as history)."""
+    from ..models import ToolEvent
+
+    wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
+    if not wo:
+        raise HTTPException(404, "Work order not found")
+    wo_no = wo.work_order_no
+    db.query(ProductionPlan).filter(ProductionPlan.work_order_id == wo_id).update(
+        {ProductionPlan.work_order_id: None},
+        synchronize_session=False,
+    )
+    try:
+        db.query(ToolEvent).filter(ToolEvent.work_order_id == wo_id).update(
+            {ToolEvent.work_order_id: None},
+            synchronize_session=False,
+        )
+    except Exception:
+        pass
+    db.delete(wo)
+    db.commit()
+    await manager.broadcast({"type": "work_order_deleted", "work_order_id": wo_id})
+    return {"ok": True, "deleted_id": wo_id, "work_order_no": wo_no}
 
 
 def sync_work_order_after_plan_change(db: Session, work_order_id: Optional[int]):

@@ -53,11 +53,13 @@ function computePlanSlotCount(form, enabledShifts) {
 }
 
 const STATUS_CFG = {
-  pending:   { color: '#64748b', label: 'Pending',   icon: '⏳' },
-  running:   { color: '#0ea5e9', label: 'Running',   icon: '▶️' },
-  completed: { color: '#10b981', label: 'Completed', icon: '✅' },
-  paused:    { color: '#f59e0b', label: 'Paused',    icon: '⏸️' },
-  cancelled: { color: '#ef4444', label: 'Cancelled', icon: '❌' },
+  pending:    { color: '#64748b', label: 'Pending',    icon: '⏳' },
+  running:    { color: '#0ea5e9', label: 'Running',    icon: '▶️' },
+  completed:  { color: '#10b981', label: 'Completed',  icon: '✅' },
+  paused:     { color: '#f59e0b', label: 'Paused',     icon: '⏸️' },
+  cancelled:  { color: '#ef4444', label: 'Cancelled',  icon: '❌' },
+  aborted:    { color: '#9f1239', label: 'Aborted',    icon: '⏹' },
+  incomplete: { color: '#a16207', label: 'Incomplete', icon: '⚠' },
 };
 
 const TYPE_CFG = {
@@ -72,15 +74,51 @@ const INIT_FORM = {
   end_date: new Date().toISOString().split('T')[0],
   shift: 'A', shift_scope: 'single', selected_shifts: ['A'],
   station_no: 1, machine_id: '',
-  part_id: '',
-  current_operation: '', next_operation: '', model_variant: '',
-  process_time: '', loading_unloading: 10,
+  mold_id: '',
+  model_variant: '',
+  process_time: '',
+  loading_unloading: 10, // mold change time (sec)
   planned_qty: '', priority: 1,
   plan_type: 'scheduled', plan_mode: 'single', notes: '',
   use_machine: false,  // false = station mode, true = individual machine mode
   work_order_id: '',
   enable_machine_suggestions: true,
+  // Mold master snapshot (editable where noted)
+  part_no: '',
+  standard_cavity: '',
+  running_cavity: '',
+  customer_name: '',
+  rm_grade: '',
+  batch_grn_no: '',
+  std_shot_weight: '',
+  colour: '',
+  std_part_weight: '',
+  prod_plan: '',
+  std_runner_weight: '',
+  cavity_name: '',
+  cavity_id: '',
+  cavity_change: false,
+  target_per_shift: '',
+  mold_change_time: '10',
+  mold_status: '',
+  assigned_by: '',
 };
+
+function moldOptionLabel(m) {
+  if (!m) return '';
+  return [m.tool_code, m.tool_name || m.mold_name, m.part_no].filter(Boolean).join(' · ');
+}
+
+const PLAN_MODE_LABELS = {
+  single: 'Single Day',
+  weekly: 'Weekly',
+  monthly: 'Monthly',
+  custom_range: 'Custom Range',
+};
+
+function prodPlanFromMode(mode) {
+  return PLAN_MODE_LABELS[mode] || PLAN_MODE_LABELS.single;
+}
 
 const PLC_ITEMS = [
   { label: 'MQTT',       desc: 'Topic: titan/station/{station_no}/actual_qty',  color: '#8b5cf6' },
@@ -128,6 +166,7 @@ export default function ProductionPlanning() {
   const [machines, setMachines] = useState([]);
   const [stations, setStations]       = useState([]);
   const [parts, setParts]       = useState([]);
+  const [molds, setMolds]       = useState([]);
   const [summary, setSummary]   = useState(null);
   const [form, setForm] = usePersistedState(DRAFT_KEYS.productionPlanning, INIT_FORM);
 
@@ -259,34 +298,84 @@ export default function ProductionPlanning() {
     api.get('/api/parts/options', { params: { active_only: true, limit: 500 } })
       .then((r) => setParts(r.data))
       .catch(() => setParts([]));
+    api.get('/api/tools/', { params: { active_only: true, limit: 1000 } })
+      .then((r) => setMolds(Array.isArray(r.data) ? r.data : []))
+      .catch(() => setMolds([]));
   }, []);
 
-  const applyPartToForm = useCallback((partId, extra = {}) => {
-    if (!partId) {
-      setForm((p) => ({ ...p, part_id: '', ...extra }));
+  const applyMoldToForm = useCallback((moldId, extra = {}) => {
+    if (!moldId) {
+      setForm((p) => ({
+        ...p,
+        mold_id: '',
+        model_variant: '',
+        part_no: '',
+        standard_cavity: '',
+        running_cavity: '',
+        customer_name: '',
+        rm_grade: '',
+        std_shot_weight: '',
+        colour: '',
+        std_part_weight: '',
+        std_runner_weight: '',
+        cavity_name: '',
+        cavity_id: '',
+        cavity_change: false,
+        target_per_shift: '',
+        mold_status: '',
+        process_time: '',
+        ...extra,
+      }));
       return;
     }
-    const part = parts.find((p) => String(p.id) === String(partId));
-    if (!part) {
-      setForm((p) => ({ ...p, part_id: String(partId), ...extra }));
+    const mold = molds.find((m) => String(m.id) === String(moldId));
+    if (!mold) {
+      setForm((p) => ({ ...p, mold_id: String(moldId), ...extra }));
       return;
     }
+    const cavities = Array.isArray(mold.cavities) ? mold.cavities : [];
+    const active = mold.active_cavity || cavities.find((c) => c.enabled) || cavities[0] || null;
+    const cycle = mold.standard_cycle_time != null ? String(mold.standard_cycle_time) : '';
+    const assigned = user?.username || user?.full_name || user?.name || '';
     setForm((p) => ({
       ...p,
       ...extra,
-      part_id: String(partId),
-      model_variant: partToPlanningVariant(part),
-      // Part Master: Operation Name → Current Operation; Next Operation → Next Operation
-      current_operation: part.operation_name || '',
-      next_operation: part.next_operation || '',
-      process_time: Number.isFinite(Number(part.process_time))
-        ? String(part.process_time)
-        : '',
-      loading_unloading: Number.isFinite(Number(part.loading_unloading))
-        ? String(part.loading_unloading)
-        : '10',
+      mold_id: String(moldId),
+      model_variant: moldOptionLabel(mold),
+      part_no: mold.part_no || mold.effective_part_no || '',
+      standard_cavity: mold.standard_cavity != null ? String(mold.standard_cavity) : '',
+      running_cavity: mold.running_cavity != null ? String(mold.running_cavity) : '',
+      customer_name: mold.customer_name || '',
+      rm_grade: mold.rm_grade || '',
+      std_shot_weight: mold.std_shot_weight != null ? String(mold.std_shot_weight) : '',
+      colour: mold.colour || '',
+      std_part_weight: mold.std_part_weight != null ? String(mold.std_part_weight) : '',
+      std_runner_weight: mold.std_runner_weight != null ? String(mold.std_runner_weight) : '',
+      cavity_name: active?.name || mold.active_cavity_name || '',
+      cavity_id: active?.id || '',
+      cavity_change: false,
+      target_per_shift: mold.target_per_shift != null ? String(mold.target_per_shift) : '',
+      mold_status: mold.tool_status || '',
+      process_time: cycle,
+      loading_unloading: p.mold_change_time || p.loading_unloading || '10',
+      mold_change_time: p.mold_change_time || String(p.loading_unloading || 10),
+      assigned_by: p.assigned_by || assigned,
+      planned_qty: (!p.planned_qty && mold.target_per_shift != null)
+        ? String(mold.target_per_shift)
+        : p.planned_qty,
+      prod_plan: prodPlanFromMode(p.plan_mode),
     }));
-  }, [parts]);
+  }, [molds, user, setForm]);
+
+  const selectedMold = useMemo(
+    () => molds.find((m) => String(m.id) === String(form.mold_id)),
+    [molds, form.mold_id],
+  );
+
+  const moldCavities = useMemo(() => {
+    const list = Array.isArray(selectedMold?.cavities) ? selectedMold.cavities : [];
+    return list.filter((c) => c && (c.name || c.part_no));
+  }, [selectedMold]);
 
   useWebSocket(useCallback(msg => {
     if ([
@@ -327,7 +416,7 @@ export default function ProductionPlanning() {
   );
 
   const shiftCapacityHints = useMemo(() => {
-    const ctSec = sumCt(form.process_time, form.loading_unloading);
+    const ctSec = sumCt(form.process_time, form.mold_change_time || form.loading_unloading);
     return computePlanningCapacityHints({
       ctSec,
       shifts: selectedShifts,
@@ -335,7 +424,53 @@ export default function ProductionPlanning() {
       unplannedQty: selectedWorkOrder?.unplanned_qty ?? null,
       slotCount: planCapacity.slotCount,
     });
-  }, [form.process_time, form.loading_unloading, selectedShifts, config.breaks, selectedWorkOrder, planCapacity.slotCount]);
+  }, [form.process_time, form.mold_change_time, form.loading_unloading, selectedShifts, config.breaks, selectedWorkOrder, planCapacity.slotCount]);
+
+  const buildPlanPayload = useCallback((shifts, { toolAck = false } = {}) => {
+    const moldChange = form.mold_change_time !== '' && form.mold_change_time != null
+      ? form.mold_change_time
+      : form.loading_unloading;
+    const moldDetails = {
+      part_no: form.part_no || null,
+      standard_cavity: form.standard_cavity !== '' ? Number(form.standard_cavity) : null,
+      running_cavity: form.running_cavity !== '' ? Number(form.running_cavity) : null,
+      customer_name: form.customer_name || null,
+      rm_grade: form.rm_grade || null,
+      standard_cycle_time: form.process_time !== '' ? Number(form.process_time) : null,
+      batch_grn_no: form.batch_grn_no || null,
+      std_shot_weight: form.std_shot_weight !== '' ? Number(form.std_shot_weight) : null,
+      colour: form.colour || null,
+      std_part_weight: form.std_part_weight !== '' ? Number(form.std_part_weight) : null,
+      prod_plan: prodPlanFromMode(form.plan_mode),
+      std_runner_weight: form.std_runner_weight !== '' ? Number(form.std_runner_weight) : null,
+      cavity_name: form.cavity_name || null,
+      cavity_id: form.cavity_id || null,
+      cavity_change: !!form.cavity_change,
+      target_per_shift: form.target_per_shift !== '' ? Number(form.target_per_shift) : null,
+      mold_change_time: moldChange !== '' ? Number(moldChange) : null,
+      mold_status: form.mold_status || null,
+      assigned_by: form.assigned_by || null,
+      mold_code: selectedMold?.tool_code || null,
+      mold_name: selectedMold?.tool_name || selectedMold?.mold_name || null,
+    };
+    return {
+      machine_id: form.machine_id === '' ? null : parseInt(form.machine_id, 10),
+      work_order_id: form.work_order_id ? parseInt(form.work_order_id, 10) : null,
+      mold_id: form.mold_id ? parseInt(form.mold_id, 10) : null,
+      mold_details: moldDetails,
+      process_time: parseCtSeconds(form.process_time),
+      loading_unloading: parseCtSeconds(moldChange),
+      planned_qty: parseInt(form.planned_qty, 10),
+      priority: parseInt(form.priority, 10),
+      shift: shifts[0],
+      shifts,
+      station_no: parseInt(form.station_no, 10),
+      model_variant: form.model_variant || null,
+      plan_type: form.plan_type,
+      notes: form.notes,
+      ...(toolAck ? { tool_shortage_ack: true } : {}),
+    };
+  }, [form, selectedMold]);
 
   const createPlan = async e => {
     e.preventDefault();
@@ -343,6 +478,10 @@ export default function ProductionPlanning() {
       const shifts = resolveFormShifts(form, enabledShifts);
       if (!shifts.length) {
         setMsg('❌ Select at least one shift');
+        return;
+      }
+      if (!form.mold_id) {
+        setMsg('❌ Select a mold from mold master');
         return;
       }
       if (form.plan_mode === 'custom_range') {
@@ -361,22 +500,7 @@ export default function ProductionPlanning() {
         );
         return;
       }
-      let payload = {
-        machine_id:        form.machine_id === '' ? null : parseInt(form.machine_id),
-        work_order_id:     form.work_order_id ? parseInt(form.work_order_id, 10) : null,
-        process_time:      parseCtSeconds(form.process_time),
-        loading_unloading: parseCtSeconds(form.loading_unloading),
-        planned_qty:       parseInt(form.planned_qty),
-        priority:          parseInt(form.priority),
-        shift:             shifts[0],
-        shifts,
-        station_no:           parseInt(form.station_no),
-        current_operation:       form.current_operation,
-        next_operation:       form.next_operation,
-        model_variant:       form.model_variant || null,
-        plan_type:         form.plan_type,
-        notes:             form.notes
-      };
+      let payload = buildPlanPayload(shifts);
 
       const shiftLabel = shifts.length > 1 ? `${shifts.length} shifts (${shifts.join(', ')})` : `shift ${shifts[0]}`;
 
@@ -422,21 +546,7 @@ export default function ProductionPlanning() {
           // Rebuild payload for ack retry
           const shifts = resolveFormShifts(form, enabledShifts);
           let payload = {
-            machine_id: form.machine_id === '' ? null : parseInt(form.machine_id),
-            work_order_id: form.work_order_id ? parseInt(form.work_order_id, 10) : null,
-            process_time: parseCtSeconds(form.process_time),
-            loading_unloading: parseCtSeconds(form.loading_unloading),
-            planned_qty: parseInt(form.planned_qty),
-            priority: parseInt(form.priority),
-            shift: shifts[0],
-            shifts,
-            station_no: parseInt(form.station_no),
-            current_operation: form.current_operation,
-            next_operation: form.next_operation,
-            model_variant: form.model_variant || null,
-            plan_type: form.plan_type,
-            notes: form.notes,
-            tool_shortage_ack: true,
+            ...buildPlanPayload(shifts, { toolAck: true }),
           };
           if (form.plan_mode === 'single') payload.plan_date = form.plan_date;
           else if (form.plan_mode === 'weekly') {
@@ -495,6 +605,8 @@ export default function ProductionPlanning() {
         setMsg('✅ Plan started');
       } else if (status === 'paused') {
         setMsg('⏸ Plan paused');
+      } else if (status === 'aborted') {
+        setMsg('⏹ Plan aborted — will not resume');
       } else if (status === 'completed') {
         setMsg('✅ Plan completed');
       }
@@ -602,6 +714,7 @@ export default function ProductionPlanning() {
         ['Completed:', summary?.by_status?.completed || 0],
         ['Paused:', summary?.by_status?.paused || 0],
         ['Cancelled:', summary?.by_status?.cancelled || 0],
+        ['Aborted:', summary?.by_status?.aborted || 0],
       ];
       const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
       summaryWs['!cols'] = [{ wch: 20 }, { wch: 15 }];
@@ -989,7 +1102,11 @@ export default function ProductionPlanning() {
                         ...s.modeBtn,
                         ...(form.plan_mode === mode.value ? s.modeBtnActive : s.modeBtnInactive)
                       }}
-                      onClick={() => setForm(p => ({ ...p, plan_mode: mode.value }))}
+                      onClick={() => setForm((p) => ({
+                        ...p,
+                        plan_mode: mode.value,
+                        prod_plan: prodPlanFromMode(mode.value),
+                      }))}
                     >
                       <div style={{ fontWeight: 600, fontSize: 13 }}>{mode.label}</div>
                       <div style={{ fontSize: 11, opacity: 0.8, marginTop: 2 }}>{mode.desc}</div>
@@ -1015,20 +1132,20 @@ export default function ProductionPlanning() {
               <select style={s.inp} value={form.work_order_id}
                 onChange={(e) => {
                   const wo = workOrders.find((w) => String(w.id) === e.target.value);
-                  if (wo?.part_id) {
-                    applyPartToForm(wo.part_id, { work_order_id: e.target.value });
+                  if (wo?.mold_id) {
+                    applyMoldToForm(wo.mold_id, { work_order_id: e.target.value });
                   } else {
                     setForm((p) => ({
                       ...p,
                       work_order_id: e.target.value,
-                      model_variant: wo?.model_variant || p.model_variant,
+                      model_variant: wo?.mold_label || wo?.model_variant || wo?.mold_name || p.model_variant,
                     }));
                   }
                 }}>
                 <option value="">— Optional: link plan to work order —</option>
                 {workOrders.map((wo) => (
                   <option key={wo.id} value={wo.id}>
-                    {wo.work_order_no} · {wo.model_variant || wo.part_no} · {wo.remaining_qty}/{wo.target_qty} remaining
+                    {wo.work_order_no} · {wo.mold_label || wo.model_variant || wo.mold_name || wo.part_no} · {wo.remaining_qty}/{wo.target_qty} remaining
                   </option>
                 ))}
               </select>
@@ -1179,7 +1296,7 @@ export default function ProductionPlanning() {
                 </select>
                 <MachineSuggestions
                   t={t}
-                  partId={form.part_id}
+                  partId={null}
                   modelVariant={form.model_variant}
                   enabled={form.enable_machine_suggestions}
                   machines={machines}
@@ -1190,92 +1307,211 @@ export default function ProductionPlanning() {
                   }))}
                 />
               </FField>
-              <FField t={t} label="Part (Part Master)" wide>
+
+              <FField t={t} label="Mold Master *" wide>
                 <select
                   style={s.inp}
-                  value={form.part_id}
-                  onChange={(e) => applyPartToForm(e.target.value)}
+                  value={form.mold_id}
+                  required
+                  onChange={(e) => applyMoldToForm(e.target.value)}
                 >
-                  <option value="">— Select part to auto-fill details —</option>
-                  {parts.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {partToPlanningVariant(p)}
-                      {p.model_variant && p.model_variant !== p.part_no ? ` (variant: ${p.model_variant})` : ''}
-                    </option>
+                  <option value="">— Select mold —</option>
+                  {molds.map((m) => (
+                    <option key={m.id} value={m.id}>{moldOptionLabel(m)}</option>
                   ))}
                 </select>
               </FField>
-              <FField t={t} label="Current Operation">
-                <input
-                  style={s.inp}
-                  value={form.current_operation}
-                  onChange={e => setForm(p => ({ ...p, current_operation: e.target.value }))}
-                  placeholder="From Part Master — Operation Name"
-                  required
-                />
+              <FField t={t} label="Mold Name">
+                <input style={{ ...s.inp, background: t.surface2 }} readOnly
+                  value={selectedMold?.tool_name || selectedMold?.mold_name || ''}
+                  placeholder="From mold master" />
               </FField>
-              <FField t={t} label="Next Operation">
-                <input
-                  style={s.inp}
-                  value={form.next_operation}
-                  onChange={e => setForm(p => ({ ...p, next_operation: e.target.value }))}
-                  placeholder="From Part Master — Next Operation"
-                  required
-                />
-              </FField>
-              <FField t={t} label="Model / Variant">
-                <input
-                  style={s.inp}
-                  value={form.model_variant}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    const match = parts.find((p) => partToPlanningVariant(p) === val.trim());
-                    if (match) {
-                      applyPartToForm(match.id);
-                    } else {
-                      setForm((p) => ({ ...p, model_variant: val, part_id: '' }));
-                    }
-                  }}
-                  placeholder="e.g. TL/TQW/DI/12/250/80"
-                  list="plan-part-variants"
-                />
-                <datalist id="plan-part-variants">
-                  {parts.map((p) => (
-                    <option key={p.id} value={partToPlanningVariant(p)} />
-                  ))}
-                </datalist>
-              </FField>
-              <FField t={t} label="Process Time (sec)">
-                <input
-                  style={s.inp}
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={form.process_time === '' || form.process_time == null || Number.isNaN(Number(form.process_time))
-                    ? ''
-                    : form.process_time}
-                  onChange={e => isValidDecimalInput(e.target.value) && setForm(p => ({ ...p, process_time: e.target.value }))}
-                  placeholder="From Part Master"
-                  required
-                />
-              </FField>
-              <FField t={t} label="L&U Time (sec)">
-                <input
-                  style={s.inp}
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={form.loading_unloading === '' || form.loading_unloading == null || Number.isNaN(Number(form.loading_unloading))
-                    ? ''
-                    : form.loading_unloading}
-                  onChange={e => isValidDecimalInput(e.target.value) && setForm(p => ({ ...p, loading_unloading: e.target.value }))}
-                  placeholder="From Part Master"
-                />
-              </FField>
-              <FField t={t} label="Cycle Time CT (sec)">
-                <input style={{ ...s.inp, background: t.surface2, color: t.brand, fontWeight: 700 }} readOnly
-                  value={formatCtSeconds(sumCt(form.process_time, form.loading_unloading))} />
-              </FField>
+
+              <div style={{
+                gridColumn: '1 / -1',
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+                gap: 12,
+                padding: 12,
+                borderRadius: 8,
+                background: t.surface2,
+                border: `1px solid ${t.border}`,
+              }}>
+                <div style={{ gridColumn: '1 / -1', fontSize: 12, fontWeight: 700, color: t.accent }}>
+                  Mold details (from mold master)
+                  <span style={{ marginLeft: 8, fontWeight: 500, color: t.textDim }}>
+                    Read-only except highlighted fields — edit master data in Mold Management
+                  </span>
+                </div>
+
+                {/* Editable / derived — highlighted */}
+                <div style={{
+                  gridColumn: '1 / -1',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+                  gap: 12,
+                }}>
+                  <div style={{
+                    padding: 10,
+                    borderRadius: 8,
+                    border: '1px solid #f59e0b',
+                    background: 'rgba(245, 158, 11, 0.10)',
+                    boxShadow: 'inset 0 0 0 1px rgba(245, 158, 11, 0.15)',
+                  }}>
+                    <FField t={t} label="Running Cavity (editable)">
+                      <input
+                        style={{
+                          ...s.inp,
+                          border: '1px solid #f59e0b',
+                          background: t.inp,
+                          fontWeight: 700,
+                        }}
+                        type="number"
+                        min="0"
+                        value={form.running_cavity}
+                        onChange={(e) => setForm((p) => ({ ...p, running_cavity: e.target.value }))}
+                      />
+                    </FField>
+                  </div>
+                  <div style={{
+                    padding: 10,
+                    borderRadius: 8,
+                    border: '1px solid #38bdf8',
+                    background: 'rgba(56, 189, 248, 0.10)',
+                    boxShadow: 'inset 0 0 0 1px rgba(56, 189, 248, 0.15)',
+                  }}>
+                    <FField t={t} label="Prod Plan (from Plan Mode)">
+                      <input
+                        style={{
+                          ...s.inp,
+                          border: '1px solid #38bdf8',
+                          background: t.bg,
+                          fontWeight: 700,
+                          color: t.accent,
+                        }}
+                        readOnly
+                        value={prodPlanFromMode(form.plan_mode)}
+                      />
+                      <div style={{ fontSize: 10, color: t.textDim, marginTop: 4 }}>
+                        Changes when you pick Single Day / Weekly / Monthly / Custom Range above
+                      </div>
+                    </FField>
+                  </div>
+                  <div style={{
+                    padding: 10,
+                    borderRadius: 8,
+                    border: '1px solid #f59e0b',
+                    background: 'rgba(245, 158, 11, 0.10)',
+                    boxShadow: 'inset 0 0 0 1px rgba(245, 158, 11, 0.15)',
+                  }}>
+                    <FField t={t} label="Cavity Name (editable)">
+                      <select
+                        style={{
+                          ...s.inp,
+                          border: '1px solid #f59e0b',
+                          background: form.cavity_change ? t.inp : t.bg,
+                          fontWeight: 600,
+                        }}
+                        value={form.cavity_id || form.cavity_name || ''}
+                        disabled={!form.cavity_change}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          const cav = moldCavities.find((c) => String(c.id) === String(val) || c.name === val);
+                          setForm((p) => ({
+                            ...p,
+                            cavity_id: cav?.id || '',
+                            cavity_name: cav?.name || val,
+                            part_no: cav?.part_no || p.part_no,
+                          }));
+                        }}
+                      >
+                        <option value="">{form.cavity_name || '— Select cavity —'}</option>
+                        {moldCavities.map((c) => (
+                          <option key={c.id || c.name} value={c.id || c.name}>
+                            {c.name}{c.part_no ? ` (${c.part_no})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <label style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        marginTop: 8,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: '#f59e0b',
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={!!form.cavity_change}
+                          onChange={(e) => setForm((p) => ({ ...p, cavity_change: e.target.checked }))}
+                        />
+                        Cavity name change (enable to select another cavity)
+                      </label>
+                    </FField>
+                  </div>
+                </div>
+
+                {/* Mold master — read only */}
+                <FField t={t} label="Part No">
+                  <input style={{ ...s.inp, background: t.bg, opacity: 0.95 }} readOnly value={form.part_no} />
+                </FField>
+                <FField t={t} label="Standard Cavity">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.standard_cavity} />
+                </FField>
+                <FField t={t} label="Customer Name">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.customer_name} />
+                </FField>
+                <FField t={t} label="RM Grade">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.rm_grade} />
+                </FField>
+                <FField t={t} label="Standard Cycle Time (sec)">
+                  <input
+                    style={{ ...s.inp, background: t.bg }}
+                    readOnly
+                    value={form.process_time === '' || form.process_time == null || Number.isNaN(Number(form.process_time)) ? '' : form.process_time}
+                  />
+                </FField>
+                <FField t={t} label="Batch / GRN No">
+                  <input
+                    style={s.inp}
+                    value={form.batch_grn_no}
+                    onChange={(e) => setForm((p) => ({ ...p, batch_grn_no: e.target.value }))}
+                    placeholder="Plan-level batch / GRN"
+                  />
+                </FField>
+                <FField t={t} label="Std Shot Weight">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.std_shot_weight} />
+                </FField>
+                <FField t={t} label="Colour">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.colour} />
+                </FField>
+                <FField t={t} label="Std. Part Weight">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.std_part_weight} />
+                </FField>
+                <FField t={t} label="Std Runner Weight">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.std_runner_weight} />
+                </FField>
+                <FField t={t} label="Target / Shift">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.target_per_shift} />
+                </FField>
+                <FField t={t} label="Mold Change Time (sec)">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.mold_change_time} />
+                </FField>
+                <FField t={t} label="Mold Status">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.mold_status} />
+                </FField>
+                <FField t={t} label="Assigned By">
+                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.assigned_by} />
+                </FField>
+                <FField t={t} label="Cycle Time CT (sec)">
+                  <input
+                    style={{ ...s.inp, background: t.bg, color: t.brand, fontWeight: 700 }}
+                    readOnly
+                    value={formatCtSeconds(sumCt(form.process_time, form.mold_change_time || form.loading_unloading))}
+                  />
+                </FField>
+              </div>
               {shiftCapacityHints && (
                 <div style={{ gridColumn: '1 / -1', padding: 12, borderRadius: 8, background: t.surface2, border: `1px solid ${t.border}` }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>
@@ -1571,21 +1807,24 @@ export default function ProductionPlanning() {
                 <div style={s.pipelineHeader}>{getStationLabel(parseInt(stationNo))}</div>
                 {queue.length === 0 && <div style={s.pipelineEmpty}>Queue empty</div>}
                 {queue.map((p, idx) => {
-                  const partLabel = planModelVariant(p, parts);
+                  const partLabel = p.mold_label || p.mold_name || planModelVariant(p, parts) || p.model_variant;
+                  const cavityLabel = p.mold_details?.cavity_name || p.next_operation;
                   const wo = workOrders.find(w => w.id === p.work_order_id);
                   const canStart = isPlanDateReached(p.plan_date);
                   return (
                   <div key={p.id} className={surfaceClass(t, 'raised')} style={{ ...s.pipelineItem, borderLeft: `3px solid ${idx === 0 ? t.accent : t.border}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ color: idx === 0 ? t.accent : t.textMuted, fontWeight: idx === 0 ? 700 : 400, fontSize: 13 }}>
-                        {idx === 0 ? '▶ ' : `${idx+1}. `}{p.current_operation}
+                        {idx === 0 ? '▶ ' : `${idx+1}. `}{partLabel || p.current_operation}
                       </span>
                       <span style={{ ...s.typeBadge, background: TYPE_CFG[p.plan_type]?.color + '33',
                                      color: TYPE_CFG[p.plan_type]?.color }}>
                         {p.plan_type}
                       </span>
                     </div>
-                    <div style={{ color: t.textDim, fontSize: 11 }}>→ {p.next_operation}</div>
+                    {cavityLabel && cavityLabel !== '-' && (
+                      <div style={{ color: t.textDim, fontSize: 11 }}>Cavity: {cavityLabel}</div>
+                    )}
                     {wo && (
                       <div style={{ marginTop: 2 }}>
                         <Link to={`/work-orders?id=${wo.id}`}
@@ -1668,7 +1907,7 @@ export default function ProductionPlanning() {
             <thead>
               <tr>
                 {canEdit && <th style={s.th}>☑</th>}
-                {['Date','Shift','Station','Machine','Work Order','Model / Variant','Current Operation','Next Operation','CT(s)','Type','Priority',
+                {['Date','Shift','Station','Machine','Work Order','Mold','Cavity','CT(s)','Type','Priority',
                   'Planned','Actual','%','Status','Actions'].map(h =>
                   <th key={h} style={s.th}>{h}</th>)}
               </tr>
@@ -1677,10 +1916,13 @@ export default function ProductionPlanning() {
               {plans.filter(p => {
                 if (!planSearch.trim()) return true;
                 const q = planSearch.toLowerCase();
-                const variant = (planModelVariant(p, parts) || p.model_variant || '').toLowerCase();
+                const variant = (planModelVariant(p, parts) || p.model_variant || p.mold_label || '').toLowerCase();
                 const machineName = (machines.find(m => m.id === p.machine_id)?.name || '').toLowerCase();
+                const cavity = (p.mold_details?.cavity_name || p.next_operation || '').toLowerCase();
                 return (
                   variant.includes(q) ||
+                  cavity.includes(q) ||
+                  (p.mold_name || '').toLowerCase().includes(q) ||
                   (p.current_operation || '').toLowerCase().includes(q) ||
                   (p.next_operation || '').toLowerCase().includes(q) ||
                   getStationLabel(p.station_no).toLowerCase().includes(q) ||
@@ -1716,9 +1958,8 @@ export default function ProductionPlanning() {
                         </Link>
                       ) : '—'}
                     </td>
-                    <td style={s.td}>{planModelVariant(p, parts) || '—'}</td>
-                    <td style={s.td}>{p.current_operation}</td>
-                    <td style={s.td}>{p.next_operation}</td>
+                    <td style={s.td}>{p.mold_label || p.mold_name || planModelVariant(p, parts) || p.model_variant || '—'}</td>
+                    <td style={s.td}>{p.mold_details?.cavity_name || p.next_operation || '—'}</td>
                     <td style={s.td}>{formatCtSeconds(sumCt(p.process_time, p.loading_unloading))}</td>
                     <td style={s.td}>
                       <span style={{ ...s.typeBadge, background: TYPE_CFG[p.plan_type]?.color + '33',
@@ -1765,7 +2006,8 @@ export default function ProductionPlanning() {
                           </span>
                         )}
                         {p.status === 'pending' && canEdit && canStart && !p.awaiting_model_change && (
-                          <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => setStatus(p.id, 'running')}>▶</button>
+                          <button style={{ ...s.miniBtn, background: t.accent }} title="Start — raises Model Change if part differs"
+                            onClick={() => setStatus(p.id, 'running')}>▶</button>
                         )}
                         {p.status === 'pending' && canEdit && !canStart && !p.awaiting_model_change && (
                           <span title={`Start allowed on or after ${p.plan_date}`}
@@ -1773,7 +2015,8 @@ export default function ProductionPlanning() {
                         )}
                         {p.status === 'running' && (
                           <>
-                            <button style={{ ...s.miniBtn, background: '#f59e0b' }} onClick={() => setStatus(p.id, 'paused')}>⏸</button>
+                            <button style={{ ...s.miniBtn, background: '#f59e0b' }} title="Pause"
+                              onClick={() => setStatus(p.id, 'paused')}>⏸</button>
                             {canEdit && canComplete && (
                               <button style={{ ...s.miniBtn, background: t.brand }} title="Mark completed"
                                 onClick={() => setStatus(p.id, 'completed')}>✓</button>
@@ -1785,18 +2028,34 @@ export default function ProductionPlanning() {
                           </>
                         )}
                         {p.status === 'paused' && canStart && (
-                          <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => setStatus(p.id, 'running')}>▶</button>
+                          <button style={{ ...s.miniBtn, background: t.accent }} title="Resume"
+                            onClick={() => setStatus(p.id, 'running')}>▶</button>
                         )}
                         {p.status === 'paused' && !canStart && (
                           <span title={`Resume allowed on or after ${p.plan_date}`}
                             style={{ fontSize: 10, color: t.textFaint, alignSelf: 'center' }}>🔒</span>
                         )}
-                        {canEdit && ['pending', 'paused'].includes(p.status) && (
-                          <button style={{ ...s.miniBtn, background: '#6366f1' }} title="Move to next week or custom date"
-                            onClick={() => setMovePlan(p)}>↪</button>
+                        {canEdit && ['paused', 'running'].includes(p.status) && (
+                          <button
+                            style={{ ...s.miniBtn, background: '#9f1239' }}
+                            title="Abort — permanently stop this plan (will not resume)"
+                            onClick={() => {
+                              if (window.confirm(
+                                `Abort plan #${p.id}?\n\n`
+                                + 'This permanently stops the plan. It will not resume.',
+                              )) {
+                                setStatus(p.id, 'aborted');
+                              }
+                            }}
+                          >⏹</button>
                         )}
-                        {canEdit && p.status !== 'completed' && (
-                          <button style={{ ...s.miniBtn, background: '#ef4444' }} onClick={() => deletePlan(p.id)}>🗑</button>
+                        {canEdit && ['pending', 'paused'].includes(p.status) && (
+                          <button style={{ ...s.miniBtn, background: '#6366f1' }} title="Edit / reschedule"
+                            onClick={() => setMovePlan(p)}>✎</button>
+                        )}
+                        {canEdit && !['completed', 'aborted', 'incomplete'].includes(p.status) && (
+                          <button style={{ ...s.miniBtn, background: '#ef4444' }} title="Delete"
+                            onClick={() => deletePlan(p.id)}>🗑</button>
                         )}
                       </div>
                     </td>

@@ -170,10 +170,14 @@ def ensure_machine_tag_maps(db: Session, machine_id: int) -> int:
 
 
 def ensure_all_imm_tag_maps(db: Session) -> int:
+    from .energy_meter import is_energy_utility_machine
+
     seed_param_defs(db)
     machines = db.query(Machine).all()
     total = 0
     for m in machines:
+        if is_energy_utility_machine(m):
+            continue
         mtype = (m.machine_type or "").upper()
         # Seed all machines that look like IMM / molding; still allow CNC if plc_source=opcua
         if mtype in ("IMM", "INJECTION", "MOLDING") or (m.plc_source or "") == "opcua":
@@ -238,6 +242,7 @@ def ingest_samples(
     now = now_ist()
     accepted = 0
     kpiv_written = 0
+    shot_changes: Dict[str, dict] = {}
 
     for item in samples:
         if not isinstance(item, dict):
@@ -273,6 +278,8 @@ def ingest_samples(
             .first()
         )
         value_changed = True
+        prev_num = None
+        prev_text = None
         if latest:
             prev_num = latest.value_num
             prev_text = (latest.value_text or "").strip() if latest.value_text is not None else None
@@ -288,6 +295,14 @@ def ingest_samples(
             latest = ImmOpcuaLatest(machine_id=machine_id, param_key=key)
             db.add(latest)
 
+        if value_changed:
+            shot_changes[key] = {
+                "value_num": value_num,
+                "value_text": value_text,
+                "prev_num": prev_num,
+                "prev_text": prev_text,
+            }
+
         latest.value_num = value_num
         latest.value_text = (value_text or "")[:255] if value_text is not None else None
         latest.quality = quality
@@ -300,7 +315,12 @@ def ingest_samples(
         else:
             latest.recorded_at = now
 
-        if write_history and (key not in CYCLE_ACTIVITY_KEYS or value_changed):
+        # History: cycle tags + shot-sequence status tags only when value changes
+        shot_status_keys = ("Injection_Status", "Refilling_Status")
+        write_this = True
+        if key in CYCLE_ACTIVITY_KEYS or key in shot_status_keys:
+            write_this = value_changed
+        if write_history and write_this:
             db.add(
                 ImmOpcuaSample(
                     machine_id=machine_id,
@@ -328,6 +348,22 @@ def ingest_samples(
                 kpiv_written += 1
         accepted += 1
 
+    # Shot sequence detection is handled in Node-RED (EAP_Shot_Event).
+    # Optional backend FSM remains available via IMM_BACKEND_SHOT_FSM=1.
+    shots_detected = 0
+    backend_fsm = str(os.getenv("IMM_BACKEND_SHOT_FSM", "0")).strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if backend_fsm and shot_changes:
+        try:
+            from .imm_shot_counter import apply_shot_changes
+
+            shots_detected = apply_shot_changes(
+                db, machine_id, shot_changes, now=now, source=source, commit=False,
+            )
+        except Exception:
+            shots_detected = 0
+
     db.commit()
 
     # Mirror Motor/Heater-derived status into machine_status_log for Hit Rate / OEE
@@ -336,7 +372,12 @@ def ingest_samples(
     except Exception:
         pass
 
-    return {"accepted": accepted, "kpiv_written": kpiv_written, "recorded_at": now.isoformat()}
+    return {
+        "accepted": accepted,
+        "kpiv_written": kpiv_written,
+        "shots_detected": shots_detected,
+        "recorded_at": now.isoformat(),
+    }
 
 
 def sync_imm_status_log(db: Session, machine_id: int, source: str = "imm_opcua") -> Optional[str]:

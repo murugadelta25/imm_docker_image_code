@@ -64,7 +64,7 @@ export default function WorkOrderManagement() {
   const [mainTab, setMainTab] = useState('active');
   const [workOrders, setWorkOrders] = useState([]);
   const [detail, setDetail] = useState(null);
-  const [parts, setParts] = useState([]);
+  const [molds, setMolds] = useState([]);
   const [search, setSearch] = useState('');
   const weekDefault = currentWeekRange();
   const [dateFrom, setDateFrom] = useState(weekDefault.from);
@@ -72,6 +72,9 @@ export default function WorkOrderManagement() {
   const [appliedRange, setAppliedRange] = useState(weekDefault);
   const [appliedSearch, setAppliedSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [editingWo, setEditingWo] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -80,6 +83,7 @@ export default function WorkOrderManagement() {
   const detailRef = useRef(null);
 
   const canCreate = user?.role !== 'maintenance';
+  const canManage = canCreate;
 
   const fetchList = useCallback(async () => {
     const { from: rangeFrom, to: rangeTo } = appliedRange;
@@ -203,9 +207,9 @@ export default function WorkOrderManagement() {
     }
   }, [selectedId, detail]);
   useEffect(() => {
-    api.get('/api/parts/options', { params: { active_only: true, limit: 500 } })
-      .then((r) => setParts(r.data))
-      .catch(() => setParts([]));
+    api.get('/api/tools/', { params: { active_only: true, limit: 1000 } })
+      .then((r) => setMolds(Array.isArray(r.data) ? r.data : []))
+      .catch(() => setMolds([]));
   }, []);
 
   useWebSocket(useCallback((m) => {
@@ -234,6 +238,92 @@ export default function WorkOrderManagement() {
 
   const viewTrackRecord = (id) => {
     toggleWorkOrder(id);
+  };
+
+  const openEditWo = async (wo) => {
+    if (!wo?.id) return;
+    try {
+      const r = await api.get(`/api/work-orders/${wo.id}`);
+      setEditingWo(r.data);
+    } catch {
+      setEditingWo(wo);
+    }
+    setShowAddModal(true);
+  };
+
+  const closeWoModal = () => {
+    setShowAddModal(false);
+    setEditingWo(null);
+  };
+
+  const deleteWorkOrder = async (wo) => {
+    if (!wo?.id) return;
+    const ok = window.confirm(
+      `Delete work order ${wo.work_order_no}?\n\n`
+      + 'Linked production plans will be unlinked (not deleted).',
+    );
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/api/work-orders/${wo.id}`);
+      setMsg(`✅ Work order ${wo.work_order_no} deleted`);
+      setTimeout(() => setMsg(''), 3000);
+      if (String(selectedId) === String(wo.id)) selectWorkOrder(null);
+      await fetchList();
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const pauseWorkOrderPlans = async (wo) => {
+    if (!wo?.id) return;
+    const running = (detail?.records || []).filter((r) => r.status === 'running');
+    if (!running.length) {
+      setMsg('ℹ️ No running plans to pause for this work order');
+      setTimeout(() => setMsg(''), 3000);
+      return;
+    }
+    if (!window.confirm(`Pause ${running.length} running plan(s) for ${wo.work_order_no}?`)) return;
+    setActionBusy(true);
+    try {
+      await Promise.all(running.map((r) => api.patch(`/api/plans/${r.plan_id}/status`, { status: 'paused' })));
+      setMsg(`⏸ Paused ${running.length} plan(s)`);
+      setTimeout(() => setMsg(''), 3000);
+      await fetchList();
+      if (selectedId) await fetchDetail(selectedId);
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const abortWorkOrderPlans = async (wo) => {
+    if (!wo?.id) return;
+    const targets = (detail?.records || []).filter((r) => ['running', 'paused'].includes(r.status));
+    if (!targets.length) {
+      setMsg('ℹ️ No running/paused plans to abort for this work order');
+      setTimeout(() => setMsg(''), 3000);
+      return;
+    }
+    if (!window.confirm(
+      `Abort ${targets.length} plan(s) for ${wo.work_order_no}?\n\n`
+      + 'Aborted plans will not resume.',
+    )) return;
+    setActionBusy(true);
+    try {
+      await Promise.all(targets.map((r) => api.patch(`/api/plans/${r.plan_id}/status`, { status: 'aborted' })));
+      setMsg(`⏹ Aborted ${targets.length} plan(s)`);
+      setTimeout(() => setMsg(''), 3000);
+      await fetchList();
+      if (selectedId) await fetchDetail(selectedId);
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const savePlanActual = async (planId, qty) => {
@@ -286,7 +376,7 @@ export default function WorkOrderManagement() {
               ⬇ Download Report
             </button>
             {canCreate && (
-              <button onClick={() => setShowAddModal(true)} style={styles.addWoBtn}>
+              <button onClick={() => { setEditingWo(null); setShowAddModal(true); }} style={styles.addWoBtn}>
                 + Add Work Order
               </button>
             )}
@@ -319,7 +409,7 @@ export default function WorkOrderManagement() {
 
       {mainTab !== 'timeline' && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' }}>
-          <input style={{ ...inp, minWidth: 200 }} placeholder="Search work order, part…"
+          <input style={{ ...inp, minWidth: 200 }} placeholder="Search work order, mold…"
             value={search} onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && loadWithDateRange()} />
           <input style={inp} type="date" value={dateFrom}
@@ -346,12 +436,19 @@ export default function WorkOrderManagement() {
       {showAddModal && (
         <AddWorkOrderModal
           t={t}
-          parts={parts}
-          onClose={() => setShowAddModal(false)}
+          molds={molds}
+          editWo={editingWo}
+          onClose={closeWoModal}
           onCreated={(wo) => {
             fetchList();
             selectWorkOrder(wo.id);
             setMsg(`✅ Work order ${wo.work_order_no} saved to database`);
+          }}
+          onUpdated={(wo) => {
+            fetchList();
+            if (selectedId) fetchDetail(selectedId);
+            setMsg(`✅ Work order ${wo.work_order_no} updated`);
+            setTimeout(() => setMsg(''), 3000);
           }}
         />
       )}
@@ -370,6 +467,13 @@ export default function WorkOrderManagement() {
                 upcomingPlans={upcomingPlans}
                 scheduleOnly={scheduleOnly}
                 onClose={() => selectWorkOrder(null)}
+                canManage={canManage}
+                onEdit={openEditWo}
+                onDelete={deleteWorkOrder}
+                onPause={pauseWorkOrderPlans}
+                onAbort={abortWorkOrderPlans}
+                deleting={deleting}
+                actionBusy={actionBusy}
               />
             </div>
           )}
@@ -390,8 +494,8 @@ export default function WorkOrderManagement() {
                 <thead>
                   <tr>
                     {(mainTab === 'planned'
-                      ? ['Work Order', 'Part / Variant', 'Next Plan', 'Future Plans', 'Future Qty', 'Unplanned', 'WO Status']
-                      : ['Work Order', 'Part / Variant', 'Target', 'Completed', 'Remaining', '%', 'Status']
+                      ? ['Work Order', 'Mold', 'Next Plan', 'Future Plans', 'Future Qty', 'Unplanned', 'WO Status']
+                      : ['Work Order', 'Mold', 'Target', 'Completed', 'Remaining', '%', 'Status']
                     ).map((h) => (
                       <th key={h} style={styles.th(t)}>{h}</th>
                     ))}
@@ -410,7 +514,7 @@ export default function WorkOrderManagement() {
                           <span style={{ marginLeft: 6, fontSize: 10, color: '#8b5cf6' }}>scheduled</span>
                         )}
                       </td>
-                      <td style={styles.td(t)}>{wo.model_variant || wo.part_no || '—'}</td>
+                      <td style={styles.td(t)}>{wo.mold_label || wo.model_variant || wo.mold_name || wo.part_no || '—'}</td>
                       {mainTab === 'planned' ? (
                         <>
                           <td style={styles.td(t)}>{wo.next_plan_date || '—'}</td>
@@ -458,6 +562,13 @@ export default function WorkOrderManagement() {
               scheduleOnly={scheduleOnly}
               onClose={() => selectWorkOrder(null)}
               onSaveActual={savePlanActual}
+              canManage={canManage}
+              onEdit={openEditWo}
+              onDelete={deleteWorkOrder}
+              onPause={pauseWorkOrderPlans}
+              onAbort={abortWorkOrderPlans}
+              deleting={deleting}
+              actionBusy={actionBusy}
             />
           )}
         </div>

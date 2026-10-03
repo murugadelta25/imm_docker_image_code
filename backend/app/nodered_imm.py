@@ -16,8 +16,9 @@ NODE_RED_URL = os.getenv("NODE_RED_URL", "http://127.0.0.1:1880").rstrip("/")
 WEBHOOK_SECRET = os.getenv("NODE_RED_WEBHOOK_SECRET", "").strip()
 
 # SIE device UUID → friendly label (matches flows.json IMM_xx nodes)
-# Note: PLC_Plastech (a916642e-…) carries IMM17/IMM18 + plant energy on one device —
-# Node-RED must set machine_name / machine_id from trx.name before push.
+# Note: PLC_Plastech (a916642e-…) carries IMM17/IMM18 status AND plant energy on one device.
+# Node-RED routes machine status by trx.name (IMM17/IMM18) and plant energy as EM_PLANT
+# (not tied to any IMM — map EM_PLANT to panels in the Energy Meter dashboard).
 DEVICE_LABELS: Dict[str, str] = {
     "b695f76c-457a-4742-89d3-8950cc1f38a2": "IMM_07",
     "279cb5fc-18b1-4b7a-8e0c-fde9fc1e8fdf": "IMM_08",
@@ -26,6 +27,16 @@ DEVICE_LABELS: Dict[str, str] = {
     "e3d7ca17-9f75-43fb-b8c4-c2b389245f63": "IMM_11",
     "a916642e-1be4-4f54-a9ae-da2a4d074e91": "PLC_Plastech",
 }
+
+
+def _is_energy_entry(entry: dict, device_name: str = "") -> bool:
+    trx = str(entry.get("trx_name") or "").strip()
+    name = (device_name or str(entry.get("machine_name") or "")).strip().upper()
+    if trx.startswith("EnergyMeter_"):
+        return True
+    if name.startswith("EM_") or name.startswith("PANEL-"):
+        return True
+    return False
 
 
 def _http_get_json(path: str, timeout: float = 5.0) -> Any:
@@ -123,6 +134,7 @@ def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = N
         params = {}
 
     m = machine
+    is_energy = _is_energy_entry(entry, device_name)
     # Preferred (CNC-style): Node-RED sends EAP fleet machine_id from Machine Configuration
     if m is None:
         raw_mid = entry.get("machine_id")
@@ -131,9 +143,9 @@ def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = N
                 mid = int(raw_mid)
             except (TypeError, ValueError):
                 mid = None
-            if mid is not None:
+            if mid is not None and mid > 0:
                 m = db.query(Machine).filter(Machine.id == mid).first()
-                if not m:
+                if not m and not is_energy:
                     return {
                         "ok": False,
                         "device_id": device_id,
@@ -141,8 +153,13 @@ def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = N
                         "machine_id": mid,
                         "error": f"No machine with fleet id={mid} — check Machine Configuration ID",
                     }
-    if m is None:
+    if m is None and not is_energy:
         m = find_machine_for_device(db, device_id, device_name)
+    # Plant energy meter: dedicated EM_PLANT utility machine (not IMM17/18)
+    if m is None and is_energy:
+        from .energy_meter import ensure_energy_source_machine
+        m = ensure_energy_source_machine(db, device_name or entry.get("machine_name") or "EM_PLANT")
+        db.commit()
     if not m:
         return {
             "ok": False,
@@ -154,12 +171,51 @@ def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = N
             ),
         }
 
+    # Node-RED shot FSM sends EAP_Shot_Event=1 when a cycle completes.
+    # Record a light ImmShotEvent and strip the pulse so it is not stored as a tag.
+    params = dict(params)
+    shot_raw = params.pop("EAP_Shot_Event", None)
+    if shot_raw is None:
+        shot_raw = entry.get("shot_count")
+    shot_mode = str(entry.get("shot_mode") or params.pop("EAP_Shot_Mode", None) or "")[:40]
+    shot_pulse = False
+    if shot_raw is not None and str(shot_raw).strip() != "":
+        try:
+            shot_pulse = int(float(shot_raw)) >= 1
+        except (TypeError, ValueError):
+            shot_pulse = str(shot_raw).strip().lower() in ("1", "true", "yes", "on")
+
     samples = parameters_to_samples(params)
-    if not samples:
+    if not samples and not shot_pulse:
         return {"ok": False, "device_id": device_id, "machine_id": m.id, "error": "No parameters in payload"}
 
     ensure_machine_tag_maps(db, m.id)
-    result = ingest_samples(db, m.id, samples, source="nodered", write_history=True, sync_kpiv=True)
+    result = {"accepted": 0, "kpiv_written": 0, "shots_detected": 0}
+    if samples:
+        result = ingest_samples(db, m.id, samples, source="nodered", write_history=True, sync_kpiv=True)
+    if shot_pulse:
+        try:
+            from .models import ImmShotEvent, now_ist
+
+            db.add(
+                ImmShotEvent(
+                    machine_id=m.id,
+                    recorded_at=now_ist(),
+                    mode=(shot_mode or "nodered")[:40],
+                    source="nodered",
+                    notes="EAP_Shot_Event from Node-RED",
+                )
+            )
+            db.commit()
+            result["shots_detected"] = int(result.get("shots_detected") or 0) + 1
+            result["shot_event"] = True
+        except Exception as exc:
+            result["shot_event_error"] = str(exc)
+    try:
+        from .energy_meter import sync_energy_from_machine_ingest
+        sync_energy_from_machine_ingest(db, m.id, params)
+    except Exception:
+        pass
     return {
         "ok": True,
         "device_id": device_id,

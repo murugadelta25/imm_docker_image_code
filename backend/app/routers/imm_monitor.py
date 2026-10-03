@@ -292,7 +292,9 @@ def imm_overview(db: Session = Depends(get_db), _=Depends(get_current_user)):
     """Device monitoring summary: status counts + equipment grid."""
     from ..opcua_imm import ensure_all_imm_tag_maps, highlights_for_machine, eap_imm_status_from_opcua_highlights
 
-    machines = db.query(Machine).order_by(Machine.station_id, Machine.name).all()
+    from ..energy_meter import iter_production_machines
+
+    machines = iter_production_machines(db, order=True)
     stations = {s.id: s for s in db.query(Station).all()}
 
     # Seed IMM defaults once so KPIV alert tooltips work without opening each machine.
@@ -484,11 +486,18 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
 
 
 def _mold_master_map(db: Session) -> dict[str, dict]:
-    """Index ToolStock mold master by tool_name / tool_code (lower)."""
+    """Index ToolStock mold master by tool_name / tool_code / part_no (lower)."""
     out = {}
     for t in db.query(ToolStock).filter(ToolStock.active == 1).all():
         ser = serialize_tool(t)
-        for key in (t.tool_name, t.tool_code):
+        keys = [
+            t.tool_name,
+            t.tool_code,
+            getattr(t, "part_no", None),
+            ser.get("effective_part_no"),
+            ser.get("mold_name"),
+        ]
+        for key in keys:
             if key:
                 out[str(key).strip().lower()] = ser
     return out

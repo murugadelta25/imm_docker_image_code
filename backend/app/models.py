@@ -215,6 +215,8 @@ class WorkOrder(Base):
     id = Column(Integer, primary_key=True, index=True)
     work_order_no = Column(String(100), unique=True, nullable=False)
     part_id = Column(Integer, ForeignKey("parts.id"))
+    # IMM: work order is created against mold master (tool_stocks), not part
+    mold_id = Column(Integer, ForeignKey("tool_stocks.id"), nullable=True, index=True)
     model_variant = Column(String(100))
     description = Column(String(255))
     target_qty = Column(Integer, nullable=False)
@@ -235,6 +237,7 @@ class ProductionPlan(Base):
     shift = Column(String(1), nullable=False)
     station_no = Column(Integer, nullable=False)
     machine_id = Column(Integer, ForeignKey("machines.id"))
+    # Legacy CNC fields — for IMM filled from mold name / cavity name
     current_operation = Column(String(50), nullable=False)
     next_operation = Column(String(50), nullable=False)
     model_variant = Column(String(100))
@@ -243,12 +246,44 @@ class ProductionPlan(Base):
     planned_qty = Column(Integer, nullable=False)
     actual_qty = Column(Integer, default=0)
     priority = Column(Integer, default=1)
-    status = Column(Enum("pending","running","completed","paused","cancelled"), default="pending")
+    status = Column(
+        Enum(
+            "pending", "running", "completed", "paused", "cancelled", "aborted", "incomplete",
+            name="productionplan_status",
+        ),
+        default="pending",
+    )
     plan_type = Column(Enum("scheduled","urgent","trial"), default="scheduled")
     notes = Column(Text)
+    # IMM mold master link + snapshot of planning fields
+    mold_id = Column(Integer, ForeignKey("tool_stocks.id"), nullable=True, index=True)
+    mold_details_json = Column(Text)
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(TIMESTAMP)
     updated_at = Column(TIMESTAMP)
+
+
+def ensure_plan_status_enum(bind=None):
+    """Widen production_plans.status ENUM for aborted/incomplete (MySQL)."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import text
+        with bind.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE production_plans MODIFY COLUMN status "
+                "ENUM('pending','running','completed','paused','cancelled','aborted','incomplete') "
+                "NOT NULL DEFAULT 'pending'"
+            ))
+    except Exception as exc:
+        print(f"[WARN] ensure_plan_status_enum skipped: {exc}")
+
+
+try:
+    ensure_plan_status_enum()
+except Exception:
+    pass
+
 
 class EmailGroup(Base):
     __tablename__ = "email_groups"
@@ -1029,6 +1064,132 @@ class ImmOpcuaSample(Base):
     recorded_at = Column(DateTime, default=now_ist, index=True)
 
 
+class ImmShotEvent(Base):
+    """One detected injection shot (cycle) for a machine."""
+    __tablename__ = "imm_shot_events"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    recorded_at = Column(DateTime, default=now_ist, index=True)
+    # opcua_cycle = Injection_Time → Charging_Time → Production_Count
+    # status_tags = Injection_Status true → Refilling_Status true (IMM17/18)
+    mode = Column(String(40), default="opcua_cycle")
+    source = Column(String(40), default="nodered")
+    notes = Column(String(255))
+
+
+class ImmShotFsm(Base):
+    """Per-machine shot-sequence state machine (survives across Node-RED messages)."""
+    __tablename__ = "imm_shot_fsm"
+    machine_id = Column(Integer, ForeignKey("machines.id"), primary_key=True)
+    # idle | saw_injection | saw_charge
+    state = Column(String(40), default="idle", nullable=False)
+    mode = Column(String(40), default="opcua_cycle")
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+class EnergyMeter(Base):
+    """Factory energy meter / electrical panel (Panel-1, Panel-2, …)."""
+    __tablename__ = "energy_meters"
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(40), unique=True, nullable=False, index=True)  # PANEL-1
+    name = Column(String(120), nullable=False)  # Panel - 1
+    panel_no = Column(Integer, default=1)
+    category = Column(String(40), default="mixed")  # machines | utilities | mixed
+    # Optional: machine_id that receives Node-RED energy tags for this meter
+    source_machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True, index=True)
+    active = Column(Integer, default=1)
+    sort_order = Column(Integer, default=0)
+    notes = Column(String(255))
+    created_at = Column(DateTime, default=now_ist)
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+class EnergyMeterLoad(Base):
+    """Map an energy meter to one or more machines and/or utility loads."""
+    __tablename__ = "energy_meter_loads"
+    id = Column(Integer, primary_key=True, index=True)
+    meter_id = Column(Integer, ForeignKey("energy_meters.id"), nullable=False, index=True)
+    load_type = Column(String(20), nullable=False)  # machine | utility
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True, index=True)
+    utility_name = Column(String(120), nullable=True)
+    utility_kind = Column(String(40), nullable=True)  # motor|chiller|pump|compressor|other
+    share_pct = Column(Float, default=100.0)
+    active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=now_ist)
+
+
+class EnergyMeterLive(Base):
+    """Single overwrite row of latest live readings per meter (no per-minute history)."""
+    __tablename__ = "energy_meter_live"
+    meter_id = Column(Integer, ForeignKey("energy_meters.id"), primary_key=True)
+    # Cumulative totals from Total_enery_cumulative
+    total_kwh = Column(Float)
+    total_kvah = Column(Float)
+    total_kvarh = Column(Float)
+    pf = Column(Float)
+    # EM_Current
+    i1 = Column(Float)
+    i2 = Column(Float)
+    i3 = Column(Float)
+    # EM_Voltage phase-phase
+    v12 = Column(Float)
+    v13 = Column(Float)
+    v23 = Column(Float)
+    # EM_Voltage phase-neutral
+    v1n = Column(Float)
+    v2n = Column(Float)
+    v3n = Column(Float)
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+class EnergyShiftSnapshot(Base):
+    """
+    Shift energy accounting:
+      a = reading at shift start (captured once)
+      b = latest live reading (overwritten each update)
+      consumption = b - a
+    Retains last good values if device drops mid-shift.
+    """
+    __tablename__ = "energy_shift_snapshots"
+    id = Column(Integer, primary_key=True, index=True)
+    meter_id = Column(Integer, ForeignKey("energy_meters.id"), nullable=False, index=True)
+    shift_date = Column(Date, nullable=False, index=True)
+    shift_id = Column(String(8), nullable=False, index=True)
+    shift_name = Column(String(40))
+    # variable a
+    start_kwh = Column(Float)
+    start_kvah = Column(Float)
+    start_kvarh = Column(Float)
+    start_pf = Column(Float)
+    start_at = Column(DateTime)
+    # variable b (overwrite)
+    latest_kwh = Column(Float)
+    latest_kvah = Column(Float)
+    latest_kvarh = Column(Float)
+    latest_pf = Column(Float)
+    latest_at = Column(DateTime)
+    # b - a
+    cons_kwh = Column(Float, default=0.0)
+    cons_kvah = Column(Float, default=0.0)
+    cons_kvarh = Column(Float, default=0.0)
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+class EnergyDailyRollup(Base):
+    """Daily rollup = sum of configured shift consumptions for trends."""
+    __tablename__ = "energy_daily_rollups"
+    id = Column(Integer, primary_key=True, index=True)
+    meter_id = Column(Integer, ForeignKey("energy_meters.id"), nullable=False, index=True)
+    day = Column(Date, nullable=False, index=True)
+    kwh = Column(Float, default=0.0)
+    kvah = Column(Float, default=0.0)
+    kvarh = Column(Float, default=0.0)
+    pf_avg = Column(Float)
+    kg = Column(Float)
+    kwh_per_kg = Column(Float)
+    updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
+
+
 def ensure_imm_schema(bind=None):
     """Create IMM monitoring + OPC UA tables if missing."""
     if bind is None:
@@ -1045,6 +1206,13 @@ def ensure_imm_schema(bind=None):
             "imm_opcua_tag_maps": ImmOpcuaTagMap.__table__,
             "imm_opcua_latest": ImmOpcuaLatest.__table__,
             "imm_opcua_samples": ImmOpcuaSample.__table__,
+            "imm_shot_events": ImmShotEvent.__table__,
+            "imm_shot_fsm": ImmShotFsm.__table__,
+            "energy_meters": EnergyMeter.__table__,
+            "energy_meter_loads": EnergyMeterLoad.__table__,
+            "energy_meter_live": EnergyMeterLive.__table__,
+            "energy_shift_snapshots": EnergyShiftSnapshot.__table__,
+            "energy_daily_rollups": EnergyDailyRollup.__table__,
         }
         for name, table in tables.items():
             if not inspector.has_table(name):
@@ -1057,6 +1225,39 @@ def ensure_imm_schema(bind=None):
 
 
 ensure_imm_schema()
+
+
+def ensure_work_orders_schema(bind=None):
+    """Add mold_id (mold master / tool_stocks) for IMM work orders."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import text
+        _add_column_if_missing(bind, text, "work_orders", "mold_id", "mold_id INT NULL")
+        return True
+    except Exception as exc:
+        print(f"[WARN] ensure_work_orders_schema failed: {exc}")
+        return False
+
+
+ensure_work_orders_schema()
+
+
+def ensure_production_plans_schema(bind=None):
+    """Add mold_id + mold_details_json for IMM production planning."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import text
+        _add_column_if_missing(bind, text, "production_plans", "mold_id", "mold_id INT NULL")
+        _add_column_if_missing(bind, text, "production_plans", "mold_details_json", "mold_details_json TEXT NULL")
+        return True
+    except Exception as exc:
+        print(f"[WARN] ensure_production_plans_schema failed: {exc}")
+        return False
+
+
+ensure_production_plans_schema()
 
 
 def ensure_factory_schema(bind=None):

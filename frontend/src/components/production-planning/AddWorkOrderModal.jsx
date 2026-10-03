@@ -1,18 +1,40 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../../api/client';
-import { partToPlanningVariant } from '../../utils/partVariant';
+
+const todayLocalISO = () => new Date().toISOString().split('T')[0];
 
 const INIT = {
   work_order_no: '',
-  part_id: '',
+  mold_id: '',
   model_variant: '',
   description: '',
   target_qty: '',
-  start_date: new Date().toISOString().split('T')[0],
+  start_date: todayLocalISO(),
   end_date: '',
   spares_tools: [],
 };
+
+function moldLabel(m) {
+  if (!m) return '';
+  const bits = [m.tool_code, m.tool_name || m.mold_name];
+  if (m.part_no) bits.push(m.part_no);
+  return bits.filter(Boolean).join(' · ');
+}
+
+function formFromWo(editWo) {
+  if (!editWo) return { ...INIT };
+  return {
+    work_order_no: editWo.work_order_no || '',
+    mold_id: editWo.mold_id != null ? String(editWo.mold_id) : '',
+    model_variant: editWo.model_variant || editWo.mold_label || '',
+    description: editWo.description || '',
+    target_qty: editWo.target_qty != null ? String(editWo.target_qty) : '',
+    start_date: editWo.start_date || todayLocalISO(),
+    end_date: editWo.end_date || '',
+    spares_tools: Array.isArray(editWo.spares_tools) ? editWo.spares_tools.map((s) => ({ ...s })) : [],
+  };
+}
 
 const EMPTY_DRAFT = {
   name: '',
@@ -30,30 +52,19 @@ function remainingOf(stock, required) {
   return s - r;
 }
 
-function mapPartToolsToSpares(toolsParameters, stockMap = {}) {
-  const rows = toolsParameters?.rows || [];
-  return rows
-    .map((row) => {
-      const name = (row.tools_detail || row.tool_no || '').trim();
-      const toolNo = (row.tool_no || '').trim();
-      if (!name && !toolNo) return null;
-      const stockHit = (toolNo && stockMap[toolNo])
-        || (name && stockMap[name])
-        || null;
-      const stockQty = stockHit != null ? Number(stockHit.stock_qty) : null;
-      const qty = 1;
-      return {
-        name: name || toolNo,
-        tool_no: toolNo || null,
-        qty,
-        unit: stockHit?.unit || 'pcs',
-        notes: row.approx_tool_life ? `Life: ${row.approx_tool_life}` : null,
-        stock_available: stockQty,
-        remaining_qty: stockQty != null ? stockQty - qty : null,
-        source: 'part',
-      };
-    })
-    .filter(Boolean);
+function moldToSpareRow(mold) {
+  const qty = 1;
+  const stockQty = mold.stock_qty != null ? Number(mold.stock_qty) : null;
+  return {
+    name: mold.tool_name || mold.mold_name || mold.tool_code,
+    tool_no: mold.tool_code || null,
+    qty,
+    unit: mold.unit || 'pcs',
+    notes: mold.part_no ? `Part: ${mold.part_no}` : null,
+    stock_available: stockQty,
+    remaining_qty: stockQty != null ? stockQty - qty : null,
+    source: 'mold',
+  };
 }
 
 async function fetchStockLookup(tools) {
@@ -73,64 +84,46 @@ async function fetchStockLookup(tools) {
   }
 }
 
-export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
+export default function AddWorkOrderModal({ t, molds = [], onClose, onCreated, onUpdated, editWo = null }) {
   const navigate = useNavigate();
-  const [form, setForm] = useState(INIT);
+  const isEdit = Boolean(editWo?.id);
+  const [form, setForm] = useState(() => formFromWo(editWo));
   const [spareDraft, setSpareDraft] = useState(EMPTY_DRAFT);
   const [msg, setMsg] = useState('');
   const [saving, setSaving] = useState(false);
-  const [loadingTools, setLoadingTools] = useState(false);
 
   const inp = {
     padding: '7px 10px', borderRadius: 6, border: `1px solid ${t.inpBorder}`,
     background: t.inp, color: t.text, fontSize: 13, width: '100%',
   };
 
-  const goAddPart = () => {
+  const goMoldMaster = () => {
     onClose();
-    navigate('/parts');
+    navigate('/tools');
   };
 
-  const applyPart = async (partId) => {
-    const part = parts.find((p) => String(p.id) === String(partId));
-    if (!part) {
-      setForm((p) => ({ ...p, part_id: '', model_variant: '', spares_tools: [] }));
+  const applyMold = (moldId) => {
+    const mold = molds.find((m) => String(m.id) === String(moldId));
+    if (!mold) {
+      setForm((p) => ({ ...p, mold_id: '', model_variant: '', spares_tools: [] }));
       return;
     }
+    const label = moldLabel(mold);
+    const spare = moldToSpareRow(mold);
     setForm((p) => ({
       ...p,
-      part_id: String(partId),
-      model_variant: partToPlanningVariant(part),
+      mold_id: String(moldId),
+      model_variant: label,
+      // Prefer mold target/shift when creating a new WO and qty still empty
+      target_qty: (!isEdit && !p.target_qty && mold.target_per_shift)
+        ? String(mold.target_per_shift)
+        : p.target_qty,
+      spares_tools: [
+        spare,
+        ...p.spares_tools.filter((s) => s.source !== 'mold'),
+      ],
     }));
-    setLoadingTools(true);
     setMsg('');
-    try {
-      const { data: detail } = await api.get(`/api/parts/${partId}`);
-      let mapped = mapPartToolsToSpares(detail.tools_parameters);
-      if (mapped.length) {
-        const stockMap = await fetchStockLookup(mapped);
-        mapped = mapPartToolsToSpares(detail.tools_parameters, stockMap);
-      }
-      setForm((p) => ({
-        ...p,
-        part_id: String(partId),
-        model_variant: partToPlanningVariant(part),
-        spares_tools: mapped,
-      }));
-      if (!mapped.length) {
-        setMsg('No tools mapped on this part. Add tools in Part Management or add manually below.');
-      }
-    } catch (err) {
-      setMsg(err.response?.data?.detail || err.message || 'Failed to load part tools');
-      setForm((p) => ({
-        ...p,
-        part_id: String(partId),
-        model_variant: partToPlanningVariant(part),
-        spares_tools: [],
-      }));
-    } finally {
-      setLoadingTools(false);
-    }
   };
 
   const updateSpare = (idx, patch) => {
@@ -184,29 +177,49 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
     setSaving(true);
     setMsg('');
     try {
-      const payload = {
-        work_order_no: form.work_order_no.trim(),
-        part_id: form.part_id ? parseInt(form.part_id, 10) : null,
-        model_variant: form.model_variant || null,
-        description: form.description || null,
-        target_qty: parseInt(form.target_qty, 10),
-        start_date: form.start_date || null,
-        end_date: form.end_date || null,
-        spares_tools: form.spares_tools.length
-          ? form.spares_tools.map((s) => ({
-              name: s.name,
-              tool_no: s.tool_no || null,
-              qty: s.qty !== '' && s.qty != null ? parseFloat(s.qty) : null,
-              unit: s.unit || 'pcs',
-              notes: s.notes || null,
-              stock_available: s.stock_available != null ? Number(s.stock_available) : null,
-              remaining_qty: remainingOf(s.stock_available, s.qty),
-              source: s.source || null,
-            }))
-          : null,
-      };
-      const r = await api.post('/api/work-orders/', payload);
-      onCreated?.(r.data);
+      if (!form.mold_id) {
+        setMsg('Select a mold from mold master');
+        setSaving(false);
+        return;
+      }
+      const spares = form.spares_tools.length
+        ? form.spares_tools.map((s) => ({
+            name: s.name,
+            tool_no: s.tool_no || null,
+            qty: s.qty !== '' && s.qty != null ? parseFloat(s.qty) : null,
+            unit: s.unit || 'pcs',
+            notes: s.notes || null,
+            stock_available: s.stock_available != null ? Number(s.stock_available) : null,
+            remaining_qty: remainingOf(s.stock_available, s.qty),
+            source: s.source || null,
+          }))
+        : null;
+      if (isEdit) {
+        const payload = {
+          description: form.description || null,
+          target_qty: parseInt(form.target_qty, 10),
+          start_date: form.start_date || null,
+          end_date: form.end_date || null,
+          mold_id: form.mold_id ? parseInt(form.mold_id, 10) : null,
+          model_variant: form.model_variant || null,
+          spares_tools: spares,
+        };
+        const r = await api.patch(`/api/work-orders/${editWo.id}`, payload);
+        onUpdated?.(r.data);
+      } else {
+        const payload = {
+          work_order_no: form.work_order_no.trim(),
+          mold_id: parseInt(form.mold_id, 10),
+          model_variant: form.model_variant || null,
+          description: form.description || null,
+          target_qty: parseInt(form.target_qty, 10),
+          start_date: form.start_date || null,
+          end_date: form.end_date || null,
+          spares_tools: spares,
+        };
+        const r = await api.post('/api/work-orders/', payload);
+        onCreated?.(r.data);
+      }
       onClose();
     } catch (err) {
       setMsg(err.response?.data?.detail || err.message);
@@ -231,42 +244,50 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
         maxHeight: '90vh', overflow: 'auto', border: `1px solid ${t.border}`,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-          <h3 style={{ margin: 0, color: t.accent, fontSize: 16 }}>Add Work Order</h3>
+          <h3 style={{ margin: 0, color: t.accent, fontSize: 16 }}>
+            {isEdit ? 'Edit Work Order' : 'Add Work Order'}
+          </h3>
           <button type="button" onClick={onClose} style={{ background: 'none', border: 'none', color: t.textDim, cursor: 'pointer', fontSize: 18 }}>✕</button>
         </div>
 
         <form onSubmit={submit}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
             <Field label="Work Order No. *" t={t}>
-              <input style={inp} required placeholder="e.g. WO-2026-07-001"
+              <input style={{ ...inp, background: isEdit ? t.surface2 : t.inp }} required
+                readOnly={isEdit}
+                placeholder="e.g. WO-2026-07-001"
                 value={form.work_order_no} onChange={(e) => setForm((p) => ({ ...p, work_order_no: e.target.value }))} />
             </Field>
             <Field label="Target Qty (pcs) *" t={t}>
               <input style={inp} type="number" min="1" required
                 value={form.target_qty} onChange={(e) => setForm((p) => ({ ...p, target_qty: e.target.value }))} />
             </Field>
-            <Field label="Part / Model / Variant *" t={t} wide>
+            <Field label="Mold *" t={t} wide>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <select style={{ ...inp, flex: 1 }} required value={form.part_id}
-                  onChange={(e) => applyPart(e.target.value)}>
-                  <option value="">— Select part —</option>
-                  {parts.map((p) => (
-                    <option key={p.id} value={p.id}>{partToPlanningVariant(p)}</option>
+                <select style={{ ...inp, flex: 1 }} required value={form.mold_id}
+                  onChange={(e) => applyMold(e.target.value)}>
+                  <option value="">— Select mold —</option>
+                  {molds.map((m) => (
+                    <option key={m.id} value={m.id}>{moldLabel(m)}</option>
                   ))}
                 </select>
-                <button type="button" onClick={goAddPart} title="Open Part Management to add a new part"
+                <button type="button" onClick={goMoldMaster} title="Open Mold Management to add a new mold"
                   style={{
-                    padding: '7px 12px', background: '#059669', color: '#fff',
+                    padding: '7px 12px', background: '#f59e0b', color: '#fff',
                     border: 'none', borderRadius: 6, cursor: 'pointer',
                     fontSize: 12, whiteSpace: 'nowrap', fontWeight: 600,
                   }}>
-                  + Add Part
+                  + Add Mold
                 </button>
               </div>
+              <div style={{ fontSize: 11, color: t.textDim, marginTop: 4 }}>
+                Work order is created against the mold master (not a part).
+              </div>
             </Field>
-            <Field label="Variant (override)" t={t} wide>
+            <Field label="Label (override)" t={t} wide>
               <input style={inp} value={form.model_variant}
-                onChange={(e) => setForm((p) => ({ ...p, model_variant: e.target.value }))} />
+                onChange={(e) => setForm((p) => ({ ...p, model_variant: e.target.value }))}
+                placeholder="Defaults to mold code · name · part" />
             </Field>
             <Field label="Period Start" t={t}>
               <input style={inp} type="date" value={form.start_date}
@@ -286,14 +307,13 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
               <div style={{ color: t.textDim, fontSize: 12 }}>
                 Spares / Tools
-                {loadingTools && <span style={{ marginLeft: 8, color: t.accent }}>Loading from part…</span>}
-                {!loadingTools && form.part_id && (
+                {form.mold_id && (
                   <span style={{ marginLeft: 8 }}>
-                    — auto-loaded from Part Management ({form.spares_tools.filter((s) => s.source === 'part').length} mapped)
+                    — mold linked ({form.spares_tools.filter((s) => s.source === 'mold').length})
                   </span>
                 )}
               </div>
-              <button type="button" onClick={() => { onClose(); navigate('/tools'); }}
+              <button type="button" onClick={goMoldMaster}
                 style={{
                   padding: '5px 12px', fontSize: 11, background: '#f59e0b', color: '#fff',
                   border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600,
@@ -319,9 +339,9 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
                   {form.spares_tools.length === 0 && (
                     <tr>
                       <td colSpan={7} style={{ ...td, color: t.textDim, textAlign: 'center' }}>
-                        {form.part_id
-                          ? 'No tools yet — add below or map tools on the part'
-                          : 'Select a part to load mapped tools'}
+                        {form.mold_id
+                          ? 'No tools yet — add below'
+                          : 'Select a mold to link mold master tools'}
                       </td>
                     </tr>
                   )}
@@ -332,8 +352,8 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
                       <tr key={i} style={{ borderBottom: `1px solid ${t.border}` }}>
                         <td style={td}>
                           <span style={{ color: t.text }}>{s.name}</span>
-                          {s.source === 'part' && (
-                            <span style={{ marginLeft: 6, fontSize: 10, color: t.textDim }}>(part)</span>
+                          {s.source === 'mold' && (
+                            <span style={{ marginLeft: 6, fontSize: 10, color: t.textDim }}>(mold)</span>
                           )}
                         </td>
                         <td style={{ ...td, color: t.textMuted }}>{s.tool_no || '—'}</td>
@@ -373,7 +393,7 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
               </table>
             </div>
 
-            <div style={{ color: t.textDim, fontSize: 11, marginBottom: 6 }}>Add another tool (not on part)</div>
+            <div style={{ color: t.textDim, fontSize: 11, marginBottom: 6 }}>Add another tool</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
               <input style={{ ...inp, flex: 2, minWidth: 120 }} placeholder="Name *"
                 value={spareDraft.name} onChange={(e) => setSpareDraft((p) => ({ ...p, name: e.target.value }))} />
@@ -390,7 +410,7 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
             </div>
           </div>
 
-          {msg && <p style={{ color: msg.startsWith('No tools') ? t.textDim : '#ef4444', fontSize: 13 }}>{msg}</p>}
+          {msg && <p style={{ color: msg.startsWith('Select') || msg.startsWith('No ') ? t.textDim : '#ef4444', fontSize: 13 }}>{msg}</p>}
 
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
             <button type="button" onClick={onClose}
@@ -399,7 +419,7 @@ export default function AddWorkOrderModal({ t, parts, onClose, onCreated }) {
             </button>
             <button type="submit" disabled={saving}
               style={{ padding: '9px 28px', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>
-              {saving ? 'Saving…' : 'Add Work Order'}
+              {saving ? 'Saving…' : (isEdit ? 'Save Changes' : 'Add Work Order')}
             </button>
           </div>
         </form>

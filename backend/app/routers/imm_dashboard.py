@@ -599,8 +599,10 @@ def _build_zones_from_config(factories: List[dict], stations: Dict[int, Station]
 
 
 def _factory_dashboard_data(db: Session) -> dict:
+    from ..energy_meter import iter_production_machines
+
     stations = {s.id: s for s in db.query(Station).all()}
-    machines = db.query(Machine).order_by(Machine.station_id, Machine.name).all()
+    machines = iter_production_machines(db, order=True)
     items = [_machine_payload(m, db, stations) for m in machines]
     counts = _status_counts(items)
     running_pct = _running_pct(items)
@@ -833,10 +835,17 @@ def zone_dashboard(zone_id: str, db: Session = Depends(get_db), _=Depends(get_cu
 
 @router.get("/equipment/{machine_id}")
 def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    from ..energy_meter import is_energy_utility_machine
+
     stations = {s.id: s for s in db.query(Station).all()}
     m = db.query(Machine).filter(Machine.id == machine_id).first()
     if not m:
         raise HTTPException(404, "Machine not found")
+    if is_energy_utility_machine(m):
+        raise HTTPException(
+            404,
+            "EM_PLANT / energy meters are utilities — use the Energy Meter dashboard, not equipment overview",
+        )
     payload = _machine_payload(m, db, stations)
     opcua = payload.get("opcua") or {}
 
@@ -859,14 +868,17 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
     part_name = text("Actual_Material_Name")
     mold_name = text("Actual_Mold_Name")
 
-    # All machines for equipment picker (Machine Management)
-    all_machines = db.query(Machine).order_by(Machine.station_id, Machine.name).all()
-    siblings = (
-        db.query(Machine)
+    from ..energy_meter import is_energy_utility_machine, iter_production_machines
+
+    # Production machines only for equipment picker (exclude EM_PLANT / energy utilities)
+    all_machines = iter_production_machines(db, order=True)
+    siblings = [
+        x for x in db.query(Machine)
         .filter(Machine.station_id == m.station_id)
         .order_by(Machine.name)
         .all()
-    )
+        if not is_energy_utility_machine(x)
+    ]
 
     factory_data = _factory_dashboard_data(db)
     zone = next(

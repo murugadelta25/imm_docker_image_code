@@ -4,6 +4,7 @@ import api from '../../api/client';
 
 export default function WorkOrderDetailPanel({
   t, detail, loading, onClose, upcomingPlans, scheduleOnly, onSaveActual,
+  canManage = false, onEdit, onDelete, onPause, onAbort, deleting = false, actionBusy = false,
 }) {
   const [actualEdit, setActualEdit] = useState({ id: null, qty: '' });
   const [saving, setSaving] = useState(false);
@@ -55,13 +56,38 @@ export default function WorkOrderDetailPanel({
       )}
       {detail && (
         <>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-            <h4 style={{ color: t.accent, margin: 0, fontSize: 14, fontWeight: 600 }}>
-              {detail.work_order?.work_order_no} — Details
-            </h4>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <h4 style={{ color: t.accent, margin: 0, fontSize: 14, fontWeight: 600 }}>
+                {detail.work_order?.work_order_no} — Details
+              </h4>
+              {canManage && (
+                <>
+                  <button type="button" onClick={() => onEdit?.(detail.work_order)}
+                    style={{ padding: '5px 12px', fontSize: 12, fontWeight: 600, background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>
+                    Edit
+                  </button>
+                  <button type="button" disabled={actionBusy}
+                    onClick={() => onPause?.(detail.work_order)}
+                    style={{ padding: '5px 12px', fontSize: 12, fontWeight: 600, background: '#f59e0b', color: '#fff', border: 'none', borderRadius: 6, cursor: actionBusy ? 'wait' : 'pointer' }}>
+                    Pause
+                  </button>
+                  <button type="button" disabled={actionBusy}
+                    onClick={() => onAbort?.(detail.work_order)}
+                    style={{ padding: '5px 12px', fontSize: 12, fontWeight: 600, background: '#9f1239', color: '#fff', border: 'none', borderRadius: 6, cursor: actionBusy ? 'wait' : 'pointer' }}>
+                    Abort
+                  </button>
+                  <button type="button" disabled={deleting}
+                    onClick={() => onDelete?.(detail.work_order)}
+                    style={{ padding: '5px 12px', fontSize: 12, fontWeight: 600, background: 'transparent', color: '#ef4444', border: '1px solid #ef4444', borderRadius: 6, cursor: deleting ? 'wait' : 'pointer', opacity: deleting ? 0.6 : 1 }}>
+                    {deleting ? 'Deleting…' : 'Delete'}
+                  </button>
+                </>
+              )}
+            </div>
             {onClose && (
               <button type="button" onClick={onClose}
-                style={{ background: 'none', border: 'none', color: t.textDim, cursor: 'pointer' }}>✕</button>
+                style={{ background: 'none', border: 'none', color: t.textDim, cursor: 'pointer', flexShrink: 0 }}>✕</button>
             )}
           </div>
 
@@ -81,7 +107,7 @@ export default function WorkOrderDetailPanel({
           </div>
 
           <div style={{ fontSize: 12, color: t.textMuted, marginBottom: 12 }}>
-            <div><strong>Part:</strong> {detail.work_order?.model_variant || detail.work_order?.part_no || '—'}</div>
+            <div><strong>Mold:</strong> {detail.work_order?.mold_label || detail.work_order?.model_variant || detail.work_order?.mold_name || detail.work_order?.part_no || '—'}</div>
             <div><strong>Period:</strong> {detail.work_order?.start_date || '—'} → {detail.work_order?.end_date || '—'}</div>
             {detail.work_order?.description && <div><strong>Description:</strong> {detail.work_order.description}</div>}
             {detail.work_order?.spares_tools?.length > 0 && (

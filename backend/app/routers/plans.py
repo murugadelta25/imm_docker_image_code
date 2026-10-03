@@ -3,16 +3,16 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import extract, func
 from datetime import date, datetime, timedelta
-from typing import Optional, List
-from pydantic import BaseModel
-import io, smtplib, os
+from typing import Any, Dict, Optional, List
+from pydantic import BaseModel, Field
+import io, json, smtplib, os
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
-from ..models import ProductionPlan, Machine, ModelChangeRequest, EmailLog, get_db, now_ist, WorkOrder
+from ..models import ProductionPlan, Machine, ModelChangeRequest, EmailLog, ToolStock, get_db, now_ist, WorkOrder
 from ..auth import get_current_user, require_role
 from ..ws_manager import manager
 from .work_orders import sync_work_order_after_plan_change
@@ -27,10 +27,13 @@ class PlanCreate(BaseModel):
     station_no: int
     machine_id: Optional[int] = None
     work_order_id: Optional[int] = None
-    current_operation: str
-    next_operation: str
+    mold_id: Optional[int] = None  # IMM mold master (tool_stocks.id)
+    mold_details: Optional[Dict[str, Any]] = None  # snapshot of mold planning fields
+    # Legacy CNC fields — optional for IMM (auto-filled from mold)
+    current_operation: Optional[str] = None
+    next_operation: Optional[str] = None
     model_variant: Optional[str] = None
-    process_time: float
+    process_time: Optional[float] = None
     loading_unloading: float = 10
     planned_qty: int
     priority: int = 1
@@ -141,6 +144,80 @@ def _apply_machine_relocation(plan: ProductionPlan, data: RescheduleRequest, db:
     plan.station_no = data.new_station_no or machine.station_id
     return f" [Machine relocated: {old_name} → {machine.name}]"
 
+def _mold_label(mold: ToolStock) -> str:
+    bits = [mold.tool_code, mold.tool_name]
+    if getattr(mold, "part_no", None):
+        bits.append(str(mold.part_no))
+    return " · ".join(b for b in bits if b)
+
+
+def _prepare_plan_row(data: PlanCreate, db: Session, user) -> dict:
+    """Resolve mold master fields into ProductionPlan column values."""
+    mold = None
+    if data.mold_id:
+        mold = db.query(ToolStock).filter(ToolStock.id == data.mold_id, ToolStock.active == 1).first()
+        if not mold:
+            raise HTTPException(404, "Mold not found in mold master")
+    elif data.work_order_id:
+        wo = db.query(WorkOrder).filter(WorkOrder.id == data.work_order_id).first()
+        if wo and getattr(wo, "mold_id", None):
+            mold = db.query(ToolStock).filter(ToolStock.id == wo.mold_id).first()
+
+    details = dict(data.mold_details or {})
+    if mold:
+        details.setdefault("mold_id", mold.id)
+        details.setdefault("mold_code", mold.tool_code)
+        details.setdefault("mold_name", mold.tool_name)
+        details.setdefault("part_no", getattr(mold, "part_no", None))
+        details.setdefault("standard_cavity", getattr(mold, "standard_cavity", None))
+        details.setdefault("customer_name", getattr(mold, "customer_name", None))
+        details.setdefault("rm_grade", getattr(mold, "rm_grade", None))
+        details.setdefault("standard_cycle_time", float(mold.standard_cycle_time) if mold.standard_cycle_time is not None else None)
+        details.setdefault("std_shot_weight", float(mold.std_shot_weight) if mold.std_shot_weight is not None else None)
+        details.setdefault("std_part_weight", float(mold.std_part_weight) if mold.std_part_weight is not None else None)
+        details.setdefault("std_runner_weight", float(mold.std_runner_weight) if mold.std_runner_weight is not None else None)
+        details.setdefault("colour", getattr(mold, "colour", None))
+        details.setdefault("target_per_shift", getattr(mold, "target_per_shift", None))
+        details.setdefault("mold_status", getattr(mold, "tool_status", None))
+        if "running_cavity" not in details or details.get("running_cavity") in (None, ""):
+            details["running_cavity"] = getattr(mold, "running_cavity", None)
+        if not details.get("cavity_name"):
+            from ..tool_service import active_cavity
+            cav = active_cavity(mold)
+            if cav:
+                details["cavity_name"] = cav.get("name")
+                details["cavity_id"] = cav.get("id")
+        if not details.get("assigned_by"):
+            details["assigned_by"] = getattr(user, "username", None) or getattr(user, "full_name", None) or str(user.id)
+
+    mold_label = _mold_label(mold) if mold else None
+    cavity = (details.get("cavity_name") or "").strip() or "-"
+    current_op = (data.current_operation or (mold.tool_name if mold else None) or mold_label or "IMM")[:50]
+    next_op = (data.next_operation or cavity)[:50]
+    model_variant = data.model_variant or mold_label
+    process_time = data.process_time
+    if process_time is None or process_time == "":
+        process_time = details.get("standard_cycle_time")
+    if process_time is None:
+        raise HTTPException(400, "Standard cycle time is required (select a mold or enter process time)")
+    loading = data.loading_unloading
+    if details.get("mold_change_time") not in (None, ""):
+        try:
+            loading = float(details["mold_change_time"])
+        except (TypeError, ValueError):
+            pass
+
+    row = data.model_dump(exclude={"end_date", "shifts", "tool_shortage_ack", "mold_details"})
+    row["mold_id"] = mold.id if mold else data.mold_id
+    row["mold_details_json"] = json.dumps(details) if details else None
+    row["current_operation"] = current_op
+    row["next_operation"] = next_op
+    row["model_variant"] = model_variant
+    row["process_time"] = float(process_time)
+    row["loading_unloading"] = float(loading if loading is not None else 10)
+    return row
+
+
 @router.post("/")
 async def create_plan(data: PlanCreate, db: Session = Depends(get_db),
                       user=Depends(get_current_user)):
@@ -206,7 +283,7 @@ async def create_plan(data: PlanCreate, db: Session = Depends(get_db),
                     )
 
     created = []
-    base = data.model_dump(exclude={"end_date", "shifts", "tool_shortage_ack"})
+    base = _prepare_plan_row(data, db, user)
     for i in range(delta):
         for shift in shifts:
             day_data = {**base, "plan_date": start + timedelta(days=i), "shift": shift}
@@ -327,7 +404,7 @@ def get_summary(
         "total_actual": total_actual,
         "achievement_pct": round(total_actual / total_planned * 100, 1) if total_planned else 0,
         "by_status": {s: sum(1 for p in plans if p.status == s)
-                      for s in ["pending","running","completed","paused","cancelled"]},
+                      for s in ["pending","running","completed","paused","cancelled","aborted","incomplete"]},
         "by_shift": {sh: {"planned": sum(p.planned_qty for p in plans if p.shift == sh),
                            "actual":  sum(p.actual_qty  for p in plans if p.shift == sh)}
                      for sh in ["A","B"]}
@@ -343,6 +420,20 @@ def _plan_dict(plan: ProductionPlan, db: Session) -> dict:
     for key in ("process_time", "loading_unloading"):
         if d.get(key) is not None:
             d[key] = float(d[key])
+    raw_details = d.pop("mold_details_json", None) or getattr(plan, "mold_details_json", None)
+    mold_details = {}
+    if raw_details:
+        try:
+            mold_details = json.loads(raw_details) if isinstance(raw_details, str) else (raw_details or {})
+        except (json.JSONDecodeError, TypeError):
+            mold_details = {}
+    d["mold_details"] = mold_details
+    if getattr(plan, "mold_id", None):
+        mold = db.query(ToolStock).filter(ToolStock.id == plan.mold_id).first()
+        if mold:
+            d["mold_code"] = mold.tool_code
+            d["mold_name"] = mold.tool_name
+            d["mold_label"] = _mold_label(mold)
     pending = (
         db.query(ModelChangeRequest)
         .filter(
@@ -424,6 +515,30 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
         _validate_may_complete_plan(plan)
     if data.status == "running" and plan.status != "running":
         _validate_may_start_plan(plan)
+
+    if data.status == "aborted":
+        if plan.status not in ("paused", "running"):
+            raise HTTPException(400, "Only running or paused plans can be aborted")
+        plan.status = "aborted"
+        plan.updated_at = now_ist()
+        machine = db.query(Machine).filter(Machine.id == plan.machine_id).first() if plan.machine_id else None
+        if machine and machine.status == "running":
+            other_running = (
+                db.query(ProductionPlan)
+                .filter(
+                    ProductionPlan.machine_id == plan.machine_id,
+                    ProductionPlan.id != plan.id,
+                    ProductionPlan.status == "running",
+                )
+                .first()
+            )
+            if not other_running:
+                machine.status = "idle"
+        from .work_orders import sync_work_order_after_plan_change
+        sync_work_order_after_plan_change(db, plan.work_order_id)
+        db.commit()
+        await manager.broadcast({"type": "plan_updated", "plan_id": plan_id, "status": "aborted"})
+        return _plan_dict(plan, db)
 
     # ── Interlock: pending → running requires model-change approval ──
     if data.status == "running" and plan.status == "pending":

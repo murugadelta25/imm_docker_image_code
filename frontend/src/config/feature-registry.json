@@ -48,6 +48,14 @@
           "navIcon": "hourlyOutput",
           "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
           "alwaysEnabled": true
+        },
+        {
+          "id": "imm.energy",
+          "label": "Energy Meter",
+          "path": "/imm/energy",
+          "navIcon": "dashboard",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
         }
       ]
     },

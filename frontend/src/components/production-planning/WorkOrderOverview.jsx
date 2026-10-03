@@ -61,7 +61,7 @@ export default function WorkOrderOverview({ t, onViewTrackRecord, selectedId }) 
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
-        <input style={{ ...inp, minWidth: 220 }} placeholder="Search work order, part…"
+        <input style={{ ...inp, minWidth: 220 }} placeholder="Search work order, mold…"
           value={search} onChange={(e) => setSearch(e.target.value)} />
         <select style={inp} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="">All Status</option>

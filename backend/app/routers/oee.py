@@ -54,6 +54,34 @@ def _cap(value: float) -> float:
     return min(float(value), 100.0)
 
 
+def _parse_mold_details(plan) -> dict:
+    raw = getattr(plan, "mold_details_json", None) if plan is not None else None
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+def _running_cavity_from_plan(plan, default: int = 1) -> int:
+    """Running cavity from plan mold snapshot (IMM). Minimum 1 for qty math."""
+    details = _parse_mold_details(plan)
+    raw = details.get("running_cavity")
+    try:
+        n = int(raw)
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _set_plan_running_cavity(plan, running_cavity: int) -> dict:
+    details = _parse_mold_details(plan)
+    details["running_cavity"] = int(running_cavity)
+    plan.mold_details_json = json.dumps(details)
+    return details
+
+
 def _calculate_display_rates(ar_raw: float, pr_raw: float, qr_raw: float) -> dict:
     ar = _cap(ar_raw)
     pr = _cap(pr_raw)
@@ -201,10 +229,15 @@ def get_entries(
         wo_map = {w.id: w.work_order_no for w in wos}
 
     plan_wo = {}
+    plan_by_mach = {}
     for p in plans:
         key = (p.machine_id, str(p.plan_date), p.shift, p.current_operation)
         if p.work_order_id and p.work_order_id in wo_map:
             plan_wo[key] = wo_map[p.work_order_id]
+        mkey = (p.machine_id, str(p.plan_date), p.shift)
+        prev = plan_by_mach.get(mkey)
+        if prev is None or (p.status == "running" and prev.status != "running"):
+            plan_by_mach[mkey] = p
 
     result = []
     for e in entries:
@@ -212,6 +245,13 @@ def get_entries(
         key = (e.machine_id, str(e.entry_date), e.shift, e.current_operation)
         d["work_order_no"] = plan_wo.get(key, "—")
         d["source"] = "manual"
+        plan = plan_by_mach.get((e.machine_id, str(e.entry_date), e.shift))
+        cav = _running_cavity_from_plan(plan, default=1) if plan else 1
+        d["running_cavity"] = cav
+        d["plan_id"] = plan.id if plan else None
+        actual = int(e.actual_qty or 0)
+        # Derive shot count from stored parts when cavity known
+        d["shot_count"] = int(actual // cav) if cav > 0 else actual
         result.append(d)
     return result
 
@@ -385,20 +425,34 @@ def _compute_realtime_oee_for_date(
             running_segs = [s for s in segments if s["state"] == "running"
                             and s["start"] >= shift_start and s["start"] < effective_end]
 
+            # Prefer running / highest-priority plan for mold cavity + CT
+            status_rank = {"running": 0, "paused": 1, "completed": 2, "pending": 3}
+            mplans_sorted = sorted(
+                mplans,
+                key=lambda p: (status_rank.get(p.status, 9), p.priority or 9999, p.id),
+            )
+            primary_plan = mplans_sorted[0] if mplans_sorted else None
+
             primary_ct = 0.0
-            for p in mplans:
+            for p in mplans_sorted:
                 ct = float(p.process_time or 0) + float(p.loading_unloading or 0)
                 if ct > 0:
                     primary_ct = ct
                     break
 
-            actual_qty = _countable_running_segments(
-                running_segs, primary_ct if primary_ct > 0 else None, threshold_ratio,
-            )
+            # Shot count from OPC UA / status-tag cycle sequences
+            # OPCUA: Injection_Time → Charging_Time → Production_Count
+            # IMM17/18: Injection_Status true → Refilling_Status true
+            from ..imm_shot_counter import count_machine_shots
+            shot_count = count_machine_shots(db, mid, shift_start, effective_end)
+            running_cavity = _running_cavity_from_plan(primary_plan, default=1)
+            # Actual parts = shots × running cavity
+            actual_qty = int(shot_count) * int(running_cavity)
 
             total_planned = sum(p.planned_qty or 0 for p in mplans)
             if primary_ct > 0 and available_mins > 0:
-                possible_qty = int(available_mins * (60.0 / primary_ct))
+                possible_shots = int(available_mins * (60.0 / primary_ct))
+                possible_qty = possible_shots * int(running_cavity)
             else:
                 possible_qty = total_planned
 
@@ -418,8 +472,8 @@ def _compute_realtime_oee_for_date(
             model_variants = list({(p.model_variant or "").strip() for p in mplans})
             model_display = ", ".join(v for v in model_variants if v) or "—"
 
-            cur_op = mplans[0].current_operation if mplans else ""
-            next_op = mplans[0].next_operation if mplans else ""
+            cur_op = primary_plan.current_operation if primary_plan else ""
+            next_op = primary_plan.next_operation if primary_plan else ""
 
             results.append({
                 "id": f"rt_{mid}_{sh_id}_{target_date.isoformat()}",
@@ -434,6 +488,9 @@ def _compute_realtime_oee_for_date(
                 "model_variant": model_display,
                 "current_operation": cur_op,
                 "next_operation": next_op,
+                "running_cavity": running_cavity,
+                "shot_count": int(shot_count),
+                "plan_id": primary_plan.id if primary_plan else None,
                 "process_time": float(primary_ct) if primary_ct else 0,
                 "loading_unloading": 0,
                 "cycle_time": float(primary_ct) if primary_ct else 0,
@@ -519,6 +576,14 @@ class DefectUpdateByMachine(BaseModel):
     note: Optional[str] = ""
 
 
+class RunningCavityUpdate(BaseModel):
+    machine_id: int
+    entry_date: date
+    shift: str
+    running_cavity: int
+    plan_id: Optional[int] = None
+
+
 def _load_site_config(db: Session) -> dict:
     from .config import DEFAULT_CONFIG, merge_config
 
@@ -579,7 +644,13 @@ def _manual_entry_to_report_row(
     machine_name: str = "",
     work_order_no: str = "",
     planned_qty=None,
+    running_cavity=None,
+    shot_count=None,
 ) -> SimpleNamespace:
+    cav = running_cavity if running_cavity is not None else getattr(e, "running_cavity", None)
+    shots = shot_count if shot_count is not None else getattr(e, "shot_count", None)
+    if shots is None and cav and int(cav) > 0:
+        shots = int((e.actual_qty or 0) // int(cav))
     return SimpleNamespace(
         id=e.id,
         source="manual",
@@ -593,6 +664,8 @@ def _manual_entry_to_report_row(
         model_variant=e.model_variant or "",
         current_operation=e.current_operation or "",
         next_operation=e.next_operation or "",
+        running_cavity=cav,
+        shot_count=shots,
         process_time=float(e.process_time or 0),
         loading_unloading=float(e.loading_unloading or 0),
         start_time=e.start_time or "",
@@ -652,6 +725,8 @@ def _realtime_to_report_row(rt: dict) -> SimpleNamespace:
         model_variant=rt.get("model_variant") or "",
         current_operation=rt.get("current_operation") or "",
         next_operation=rt.get("next_operation") or "",
+        running_cavity=rt.get("running_cavity"),
+        shot_count=rt.get("shot_count"),
         process_time=float(rt.get("process_time") or 0),
         loading_unloading=float(rt.get("loading_unloading") or 0),
         start_time="",
@@ -779,6 +854,13 @@ def collect_merged_oee_report_rows(
             if wo_no and wo_no not in (existing["wo"] or ""):
                 existing["wo"] = ", ".join(x for x in [existing["wo"], wo_no] if x)
 
+    plan_primary = {}
+    for p in all_plans:
+        k = (p.machine_id, str(p.plan_date), p.shift)
+        prev = plan_primary.get(k)
+        if prev is None or (p.status == "running" and getattr(prev, "status", None) != "running"):
+            plan_primary[k] = p
+
     manual_rows = []
     for e in manual_entries:
         pl = plan_lookup.get(
@@ -787,12 +869,15 @@ def collect_merged_oee_report_rows(
         )
         if not pl:
             pl = plan_msd.get((e.machine_id, str(e.entry_date), e.shift), {})
+        plan = plan_primary.get((e.machine_id, str(e.entry_date), e.shift))
+        cav = _running_cavity_from_plan(plan, default=1) if plan else None
         manual_rows.append(_manual_entry_to_report_row(
             e,
             station_name=station_map.get(e.station_no, str(e.station_no)),
             machine_name=machine_map.get(e.machine_id, "") if e.machine_id else "",
             work_order_no=pl.get("wo", ""),
             planned_qty=pl.get("planned"),
+            running_cavity=cav,
         ))
 
     # Live / realtime rows
@@ -1000,6 +1085,77 @@ def update_defect_by_machine(
     return _apply_defect_update(entry, data.defect_qty, data.note or "", user.id, db)
 
 
+@router.patch("/running-cavity")
+async def update_running_cavity(
+    data: RunningCavityUpdate,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Update editable Running Cavity on the production plan for a dashboard row.
+
+    Actual parts on the live dashboard = shot_count × running_cavity.
+    """
+    if data.running_cavity is None or int(data.running_cavity) < 1:
+        raise HTTPException(400, "Running cavity must be at least 1")
+    cav = int(data.running_cavity)
+
+    plan = None
+    if data.plan_id:
+        plan = db.query(ProductionPlan).filter(ProductionPlan.id == data.plan_id).first()
+    if not plan:
+        plans = (
+            db.query(ProductionPlan)
+            .filter(
+                ProductionPlan.machine_id == data.machine_id,
+                ProductionPlan.plan_date == data.entry_date,
+                ProductionPlan.shift == data.shift,
+                ProductionPlan.status.in_(["running", "paused", "pending", "completed", "incomplete"]),
+            )
+            .all()
+        )
+        if not plans:
+            raise HTTPException(404, "No production plan found for this machine/date/shift")
+        status_rank = {"running": 0, "paused": 1, "completed": 2, "pending": 3}
+        plans.sort(key=lambda p: (status_rank.get(p.status, 9), p.priority or 9999, p.id))
+        plan = plans[0]
+
+    _set_plan_running_cavity(plan, cav)
+    plan.updated_at = now_ist()
+    db.commit()
+
+    # Recalculate live row so client can refresh Actual / Possible / OEE
+    cfg = _load_site_config(db)
+    rt_rows = _compute_realtime_oee_for_date(
+        db,
+        data.entry_date,
+        cfg,
+        shift=data.shift,
+        machine_id=data.machine_id,
+        sync_actuals=False,
+    )
+    rt = next(
+        (r for r in rt_rows if r.get("machine_id") == data.machine_id and r.get("shift") == data.shift),
+        None,
+    )
+
+    from ..ws_manager import manager
+    await manager.broadcast({"type": "oee_updated", "machine_id": data.machine_id})
+
+    return {
+        "plan_id": plan.id,
+        "running_cavity": cav,
+        "shot_count": (rt or {}).get("shot_count"),
+        "actual_qty": (rt or {}).get("actual_qty"),
+        "possible_qty": (rt or {}).get("possible_qty"),
+        "production_loss": (rt or {}).get("production_loss"),
+        "ar": (rt or {}).get("ar"),
+        "pr": (rt or {}).get("pr"),
+        "qr": (rt or {}).get("qr"),
+        "oee": (rt or {}).get("oee"),
+        "accp_qty": (rt or {}).get("accp_qty"),
+    }
+
+
 def _format_defect_log(db: Session, entry_id: int) -> list:
     from ..models import User
 
@@ -1107,7 +1263,7 @@ def download_xlsx(
     ws_oee = wb.active
     ws_oee.title = "OEE Report"
     oee_hdrs = ["Date","Station","Machine","Shift","Work Order","Model / Variant",
-                "Current Operation","Next Operation","CT (sec)",
+                "Running Cavity","Shot Counts","CT (sec)",
                 "Avail (min)","Op Time (min)","Plan Qty","Possible Qty","Actual Qty",
                 "Prod Loss","Accepted Qty","Defect Qty",
                 "AR%","PR%","QR%","OEE%",
@@ -1126,11 +1282,16 @@ def download_xlsx(
         qr_raw  = float(e.qr_raw  or 0) if e.qr_raw is not None else None
         oee_raw = float(e.oee_raw or 0) if e.oee_raw is not None else None
         plan_qty = e.planned_qty if e.planned_qty is not None else ""
+        run_cav = getattr(e, "running_cavity", None)
+        shots = getattr(e, "shot_count", None)
+        if shots is None and run_cav and int(run_cav or 0) > 0:
+            shots = int((e.actual_qty or 0) // int(run_cav))
         ws_oee.append([
             str(e.entry_date), e.station_name or str(e.station_no or ""),
             e.machine_name or "",
             e.shift, e.work_order_no or "", e.model_variant or "",
-            e.current_operation, e.next_operation,
+            run_cav if run_cav is not None else "",
+            shots if shots is not None else "",
             ct, e.available_shift_time, e.operating_time,
             plan_qty, e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,

@@ -134,8 +134,26 @@ msg.payload = {
 msg.topic = machine;
 return msg;"""
 
+SAVE_ENERGY_METERS = r"""const raw = msg.payload;
+let list = [];
+if (Array.isArray(raw)) list = raw;
+else if (raw && Array.isArray(raw.meters)) list = raw.meters;
+else if (raw && typeof raw === 'object') list = Object.keys(raw);
+list = list.map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);
+if (!list.length) list = ['EM_PLANT'];
+global.set('EAP_ENERGY_METERS', list);
+node.status({ fill: 'blue', shape: 'dot', text: list.join(', ') });
+node.warn('EAP energy meter targets: ' + list.join(', ') + ' (not tied to IMM machines)');
+return null;"""
+
 MAP_ENERGY = r"""const DEVICE = 'a916642e-1be4-4f54-a9ae-da2a4d074e91';
-const ENERGY_MACHINES = ['IMM17', 'IMM18'];
+// Plant energy meter identity — NOT associated with IMM17/IMM18.
+// Map this source to any panel in the Energy Meter dashboard (source machine).
+const DEFAULT_METERS = ['EM_PLANT'];
+let ENERGY_METERS = global.get('EAP_ENERGY_METERS');
+if (!Array.isArray(ENERGY_METERS) || !ENERGY_METERS.length) ENERGY_METERS = DEFAULT_METERS;
+ENERGY_METERS = ENERGY_METERS.map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);
+if (!ENERGY_METERS.length) ENERGY_METERS = DEFAULT_METERS;
 
 const p = msg.payload || {};
 const trx = p.trx || {};
@@ -207,17 +225,18 @@ const cache = global.get('immPlantEnergyCache') || {};
 Object.assign(cache, mapped);
 cache._updated_at = new Date().toISOString();
 cache._last_trx = trxName;
+cache._meter = ENERGY_METERS[0];
 global.set('immPlantEnergyCache', cache);
 
-node.status({ fill: 'green', shape: 'dot', text: trxName + ' (' + Object.keys(mapped).length + 'p)' });
+node.status({ fill: 'green', shape: 'dot', text: ENERGY_METERS[0] + ' ' + trxName + ' (' + Object.keys(mapped).length + 'p)' });
 
-return ENERGY_MACHINES.map((machine) => ({
-  topic: 'energy:' + machine,
+return ENERGY_METERS.map((meter) => ({
+  topic: 'energy:' + meter,
   payload: {
     id: p.id,
     device: p.device || DEVICE,
-    device_name: machine,
-    machine_name: machine,
+    device_name: meter,
+    machine_name: meter,
     trx: { name: 'EnergyMeter_' + trxName, body: mapped },
     body: mapped,
     origin: p.origin,
@@ -260,15 +279,26 @@ if (!deviceId) {
 }
 
 const trxName = String((p.trx && p.trx.name) || p.name || msg.topic || '').trim();
+const isEnergyTrx = trxName.indexOf('EnergyMeter_') === 0;
+
 let label = String(p.machine_name || p.device_name || '').trim();
 if (!label && /^IMM\d+$/i.test(trxName)) label = trxName.toUpperCase();
+if (!label && isEnergyTrx) label = 'EM_PLANT';
 if (!label && DEVICE_LABELS[deviceId]) label = DEVICE_LABELS[deviceId];
 if (!label) label = deviceId;
 
-const fleet = global.get('EAP_MACHINE_FLEET') || DEFAULT_FLEET;
-const mapped = fleet[String(label).toUpperCase()] || fleet[label] || null;
+const labelKey = String(label).trim().toUpperCase();
+const isEnergyLabel = isEnergyTrx || /^EM_/.test(labelKey) || /^PANEL-/.test(labelKey);
 
-if (!mapped || !mapped.machine_id) {
+const fleet = global.get('EAP_MACHINE_FLEET') || DEFAULT_FLEET;
+let mapped = fleet[labelKey] || fleet[label] || null;
+
+// Energy meter stream is independent of IMM machines — allow name-only push
+if (!mapped && isEnergyLabel) {
+  mapped = { machine_id: null, machine_name: labelKey || 'EM_PLANT' };
+}
+
+if (!mapped || (!mapped.machine_id && !isEnergyLabel)) {
   node.warn('No EAP fleet map for ' + label + ' - edit inject "2 Set machine fleet map"');
   node.status({ fill: 'red', shape: 'ring', text: 'unmapped ' + label });
   return null;
@@ -282,11 +312,14 @@ Object.keys(body).forEach((k) => {
   }
 });
 
+const midNum = mapped.machine_id != null && mapped.machine_id !== ''
+  ? Number(mapped.machine_id)
+  : null;
 const entry = {
-  machine_id: Number(mapped.machine_id),
-  machine_name: String(mapped.machine_name || label),
+  machine_id: Number.isFinite(midNum) && midNum > 0 ? midNum : null,
+  machine_name: String(mapped.machine_name || labelKey || label),
   device_id: deviceId,
-  device_name: label,
+  device_name: labelKey || label,
   trx_name: trxName,
   message_id: p.id || null,
   received_at: new Date().toISOString(),
@@ -294,20 +327,108 @@ const entry = {
   parameters
 };
 
-const storeKey = 'm' + entry.machine_id;
+const storeKey = entry.machine_id
+  ? ('m' + entry.machine_id)
+  : ('e:' + String(entry.machine_name).toUpperCase());
 const store = global.get('immLiveByDevice') || {};
 const prev = store[storeKey] || {};
-const mergedParams = Object.assign({}, prev.parameters || {}, parameters);
+const prevParams = prev.parameters || {};
+
+// ── Shot detection in Node-RED (keeps EAP backend light) ──
+// OPCUA: Injection_Time → Charging_Time → Production_Count (separate msgs)
+// IMM17/18: Injection_Status true → Refilling_Status true (separate msgs)
+const truthy = (v) => {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  return s === 'true' || s === '1' || s === 'on' || s === 'yes';
+};
+const changed = (key) => {
+  if (!Object.prototype.hasOwnProperty.call(parameters, key)) return false;
+  return String(prevParams[key] ?? '') !== String(parameters[key] ?? '');
+};
+
+const SHOT_TIMEOUT_MS = 300000;
+const fsmAll = global.get('EAP_SHOT_FSM') || {};
+let fsm = fsmAll[storeKey] || { state: 'idle', mode: '', updated_at: 0 };
+if (fsm.state !== 'idle' && (Date.now() - Number(fsm.updated_at || 0)) > SHOT_TIMEOUT_MS) {
+  fsm = { state: 'idle', mode: '', updated_at: 0 };
+}
+
+let shot = 0;
+const opcuaTouch =
+  changed('Actual_Injection_Time') ||
+  changed('Actual_Charging_Time') ||
+  changed('Actual_Production_Count');
+const hasOpcuaContext =
+  opcuaTouch ||
+  prevParams.Actual_Injection_Time != null ||
+  parameters.Actual_Injection_Time != null ||
+  prevParams.Actual_Production_Count != null ||
+  parameters.Actual_Production_Count != null;
+
+if (!isEnergyLabel && hasOpcuaContext && opcuaTouch) {
+  const inj = changed('Actual_Injection_Time');
+  const chg = changed('Actual_Charging_Time');
+  const prod = changed('Actual_Production_Count');
+  // Injection + Charging in same msg → remember injection only
+  if (inj && chg) {
+    fsm = { state: 'saw_injection', mode: 'opcua_cycle', updated_at: Date.now() };
+  } else if (inj) {
+    fsm = { state: 'saw_injection', mode: 'opcua_cycle', updated_at: Date.now() };
+  } else if (chg) {
+    if (fsm.state === 'saw_injection') {
+      fsm = { state: 'saw_charge', mode: 'opcua_cycle', updated_at: Date.now() };
+    } else {
+      fsm = { state: 'idle', mode: 'opcua_cycle', updated_at: Date.now() };
+    }
+  } else if (prod) {
+    if (fsm.state === 'saw_charge') {
+      shot = 1;
+      fsm = { state: 'idle', mode: 'opcua_cycle', updated_at: Date.now() };
+    } else {
+      fsm = { state: 'idle', mode: 'opcua_cycle', updated_at: Date.now() };
+    }
+  }
+} else if (!isEnergyLabel && (changed('Injection_Status') || changed('Refilling_Status'))) {
+  const injRise = changed('Injection_Status') && truthy(parameters.Injection_Status) && !truthy(prevParams.Injection_Status);
+  const refRise = changed('Refilling_Status') && truthy(parameters.Refilling_Status) && !truthy(prevParams.Refilling_Status);
+  // Both rising together → remember injection only (must be sequential msgs)
+  if (injRise && refRise) {
+    fsm = { state: 'saw_injection', mode: 'status_tags', updated_at: Date.now() };
+  } else if (injRise) {
+    fsm = { state: 'saw_injection', mode: 'status_tags', updated_at: Date.now() };
+  } else if (refRise && fsm.state === 'saw_injection') {
+    shot = 1;
+    fsm = { state: 'idle', mode: 'status_tags', updated_at: Date.now() };
+  }
+}
+
+fsmAll[storeKey] = fsm;
+global.set('EAP_SHOT_FSM', fsmAll);
+
+const mergedParams = Object.assign({}, prevParams, parameters);
+delete mergedParams.EAP_Shot_Event;
 entry.parameters = mergedParams;
 entry.parameter_count = Object.keys(mergedParams).length;
-store[storeKey] = entry;
+store[storeKey] = Object.assign({}, entry);
 global.set('immLiveByDevice', store);
 
-node.status({
-  fill: 'green',
-  shape: 'dot',
-  text: entry.machine_name + ' -> fleet #' + entry.machine_id + ' (' + entry.parameter_count + 'p)'
-});
+if (shot) {
+  entry.parameters = Object.assign({}, mergedParams, { EAP_Shot_Event: '1' });
+  entry.shot_count = 1;
+  entry.shot_mode = fsm.mode || '';
+  msg.force_eap_push = true;
+  node.status({
+    fill: 'green',
+    shape: 'dot',
+    text: 'SHOT ' + entry.machine_name + (entry.machine_id ? (' #' + entry.machine_id) : '')
+  });
+} else {
+  node.status({
+    fill: 'green',
+    shape: 'dot',
+    text: entry.machine_name + (entry.machine_id ? (' -> fleet #' + entry.machine_id) : ' (energy)') + ' (' + entry.parameter_count + 'p)'
+  });
+}
 
 msg.payload = entry;
 msg.device_id = deviceId;
@@ -317,10 +438,11 @@ return msg;"""
 
 THROTTLE = r"""const entry = msg.payload || {};
 const mid = String(entry.machine_id || msg.machine_id || '').trim();
+const mname = String(entry.machine_name || '').trim().toUpperCase();
 const trx = String(entry.trx_name || '').trim();
-const isEnergy = trx.indexOf('EnergyMeter_') === 0;
-const gateKey = mid + '|' + (isEnergy ? 'energy' : 'machine');
-if (!mid) return null;
+const isEnergy = trx.indexOf('EnergyMeter_') === 0 || /^EM_/.test(mname) || /^PANEL-/.test(mname);
+const gateKey = (mid || mname || 'unknown') + '|' + (isEnergy ? 'energy' : 'machine');
+if (!mid && !mname) return null;
 
 const minMs = Number(global.get('EAP_PUSH_MIN_INTERVAL_MS'));
 const interval = Number.isFinite(minMs) && minMs >= 0 ? minMs : 10000;
@@ -341,6 +463,22 @@ const prevAt = Number(lastAt[gateKey] || 0);
 const changed = prevSig !== sig;
 const due = (now - prevAt) >= interval;
 
+const who = mid || mname;
+
+// Shot pulse from Node-RED FSM — always push immediately (EAP_Shot_Event=1)
+const shotPulse =
+  msg.force_eap_push === true ||
+  Number(entry.shot_count) === 1 ||
+  String(params.EAP_Shot_Event || '') === '1';
+if (shotPulse && !isEnergy) {
+  lastSig[gateKey] = sig;
+  lastAt[gateKey] = now;
+  global.set('immPushSigByDevice', lastSig);
+  global.set('immPushAtByDevice', lastAt);
+  node.status({ fill: 'green', shape: 'dot', text: 'push SHOT ' + who });
+  return msg;
+}
+
 // Energy totals / PF / V / I: push immediately when energy fields change (bypass short throttle)
 if (isEnergy && changed) {
   lastSig[gateKey] = sig;
@@ -350,7 +488,7 @@ if (isEnergy && changed) {
   node.status({
     fill: 'green',
     shape: 'dot',
-    text: 'push energy #' + mid + ' change'
+    text: 'push energy ' + who + ' change'
   });
   return msg;
 }
@@ -359,7 +497,7 @@ if (!due) {
   node.status({
     fill: 'yellow',
     shape: 'ring',
-    text: 'throttle ' + Math.ceil((interval - (now - prevAt)) / 1000) + 's #' + mid
+    text: 'throttle ' + Math.ceil((interval - (now - prevAt)) / 1000) + 's ' + who
   });
   return null;
 }
@@ -372,7 +510,7 @@ if (changeOnly && !changed) {
   if (since < heartbeat) {
     lastAt[gateKey] = now;
     global.set('immPushAtByDevice', lastAt);
-    node.status({ fill: 'yellow', shape: 'ring', text: 'skip unchanged #' + mid });
+    node.status({ fill: 'yellow', shape: 'ring', text: 'skip unchanged ' + who });
     return null;
   }
   // fall through — force a keep-alive push
@@ -386,7 +524,7 @@ global.set('immPushAtByDevice', lastAt);
 node.status({
   fill: 'green',
   shape: 'dot',
-  text: 'push ' + (entry.machine_name || '') + ' #' + mid + (changed ? ' change' : '')
+  text: 'push ' + (entry.machine_name || who) + (changed ? ' change' : '')
 });
 return msg;"""
 
@@ -426,6 +564,7 @@ msg.payload = {
   service: 'imm-nodered-api',
   eap_webhook_url: global.get('EAP_WEBHOOK_URL') || null,
   eap_machine_fleet: global.get('EAP_MACHINE_FLEET') || null,
+  eap_energy_meters: global.get('EAP_ENERGY_METERS') || ['EM_PLANT'],
   push_min_interval_ms: global.get('EAP_PUSH_MIN_INTERVAL_MS'),
   plant_energy: global.get('immPlantEnergyCache') || null,
   device_count: Object.keys(store).length,
@@ -455,9 +594,15 @@ return msg;"""
 
 LIVE_ONE = r"""const id = msg.req.params.deviceId;
 const store = global.get('immLiveByDevice') || {};
-let entry = store[id] || store['m' + id];
+const idUp = String(id || '').toUpperCase();
+let entry = store[id] || store['m' + id] || store['e:' + idUp];
 if (!entry) {
-  entry = Object.values(store).find((d) => d.device_id === id || String(d.machine_id) === String(id));
+  entry = Object.values(store).find((d) =>
+    d.device_id === id ||
+    String(d.machine_id) === String(id) ||
+    String(d.machine_name || '').toUpperCase() === idUp ||
+    String(d.device_name || '').toUpperCase() === idUp
+  );
 }
 if (!entry) {
   msg.payload = { ok: false, error: 'not found', device_id: id };
@@ -484,11 +629,19 @@ def main():
             "disabled": False,
             "info": (
                 "# IMM SIE EDA -> EAP IMM PMS (PUSH)\n\n"
-                "Includes IMM_07..IMM_11 plus **PLC_Plastech** (IMM17 / IMM18 + plant energy meter).\n\n"
+                "Includes IMM_07..IMM_11 plus **PLC_Plastech** (IMM17 / IMM18 status + plant energy meter).\n\n"
+                "**Shot counting (Node-RED):** Normalize & store runs a per-machine FSM and pushes "
+                "`EAP_Shot_Event=1` when a shot completes — EAP only records the event (light).\n"
+                "- OPCUA: Actual_Injection_Time → Actual_Charging_Time → Actual_Production_Count (separate msgs)\n"
+                "- IMM17/18: Injection_Status true → Refilling_Status true (separate msgs)\n\n"
                 "## Configure\n"
                 "1. Inject **1 Set EAP webhook URL**\n"
                 "2. Inject **2 Set machine fleet map** (IMM17→3, IMM18→4)\n"
-                "3. Deploy\n\n"
+                "3. Inject **3 Set energy meter targets** (default EM_PLANT — not tied to IMM machines)\n"
+                "4. Deploy\n\n"
+                "## Energy meter\n"
+                "Plant energy (PF / V / I / totals) is pushed as **EM_PLANT**. "
+                "Map that source to any panel in the Energy Meter dashboard.\n\n"
                 "## Throttle\n"
                 "Default: max **1 push / 10 seconds / machine** (energy gated separately), skip unchanged payloads.\n\n"
                 "Do NOT use :5184 for webhook (frontend only)."
@@ -613,6 +766,55 @@ def main():
             "finalize": "",
             "libs": [],
             "x": 480,
+            "y": 840,
+            "wires": [],
+        },
+        {
+            "id": "eap_energy_meters_inject",
+            "type": "inject",
+            "z": Z,
+            "name": "3 Set energy meter targets",
+            "props": [{"p": "payload"}, {"p": "topic", "vt": "str"}],
+            "repeat": "",
+            "crontab": "",
+            "once": True,
+            "onceDelay": "1.2",
+            "topic": "eap_energy_meters",
+            "payload": json.dumps(["EM_PLANT"]),
+            "payloadType": "json",
+            "x": 700,
+            "y": 820,
+            "wires": [["eap_energy_meters_save"]],
+        },
+        {
+            "id": "eap_energy_meters_reinject",
+            "type": "inject",
+            "z": Z,
+            "name": "Re-apply energy meters (manual)",
+            "props": [{"p": "payload"}, {"p": "topic", "vt": "str"}],
+            "repeat": "",
+            "crontab": "",
+            "once": False,
+            "onceDelay": 0.1,
+            "topic": "eap_energy_meters",
+            "payload": json.dumps(["EM_PLANT"]),
+            "payloadType": "json",
+            "x": 710,
+            "y": 860,
+            "wires": [["eap_energy_meters_save"]],
+        },
+        {
+            "id": "eap_energy_meters_save",
+            "type": "function",
+            "z": Z,
+            "name": "Save energy meters -> global",
+            "func": SAVE_ENERGY_METERS,
+            "outputs": 0,
+            "noerr": 0,
+            "initialize": "",
+            "finalize": "",
+            "libs": [],
+            "x": 980,
             "y": 840,
             "wires": [],
         },
@@ -944,7 +1146,7 @@ def main():
                 "id": "plastech_map_energy",
                 "type": "function",
                 "z": Z,
-                "name": "Map energy + fan-out IMM17/18",
+                "name": "Map plant energy meter",
                 "func": MAP_ENERGY,
                 "outputs": 1,
                 "noerr": 0,

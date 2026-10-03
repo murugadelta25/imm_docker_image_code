@@ -18,6 +18,7 @@ import ImmZoneDashboard from './pages/ImmZoneDashboard';
 import ImmEquipmentDetail from './pages/ImmEquipmentDetail';
 import ImmHistoryList from './pages/ImmHistoryList';
 import ImmKpiDashboard from './pages/ImmKpiDashboard';
+import ImmEnergyDashboard from './pages/ImmEnergyDashboard';
 import DataEntry from './pages/DataEntry';
 import ModelChange from './pages/ModelChange';
 import Breakdown from './pages/Breakdown';
@@ -75,6 +76,7 @@ function AppRoutes() {
         <Route path="/oee-dashboard" element={<Dashboard />} />
         <Route path="/imm/equipment/:machineId" element={<ImmEquipmentDetail />} />
         <Route path="/imm/kpis" element={<ImmKpiDashboard />} />
+        <Route path="/imm/energy" element={<ImmEnergyDashboard />} />
         <Route path="/imm/history" element={<Navigate to="/imm/kpis" replace />} />
         <Route path="/imm/history/transfer-rate" element={<Navigate to="/imm/kpis" replace />} />
         <Route path="/imm/history/hit-rate" element={<Navigate to="/imm/kpis" replace />} />

@@ -96,6 +96,7 @@ function matchesSearch(entry, term) {
     entry.model_variant,
     entry.machine_name,
     entry.work_order_no,
+    entry.running_cavity != null ? String(entry.running_cavity) : '',
   ];
   return fields.some((field) => (field || '').toLowerCase().includes(needle));
 }
@@ -118,10 +119,11 @@ export default function Dashboard() {
   const [stations, setStations] = useState([]);
   const [machines, setMachines] = useState([]);
   const [viewMode, setViewMode] = useState('day');
-  const [missingShifts, setMissingShifts] = useState([]);
   const [defectEdit, setDefectEdit] = useState({ id: null, value: '', note: '' });
   const [defectSaving, setDefectSaving] = useState(false);
   const [defectLog, setDefectLog] = useState({ id: null, records: [] });
+  const [cavityEdit, setCavityEdit] = useState({ id: null, value: '' });
+  const [cavitySaving, setCavitySaving] = useState(false);
   const [kpiDialog, setKpiDialog] = useState({ open: false, loading: false, data: null });
   const navigate = useNavigate();
 
@@ -225,68 +227,57 @@ export default function Dashboard() {
     }
   }, [buildParams, viewMode, filters.entry_date, filters.date_from, filters.date_to, filters.month, filters.year]);
 
-  // Check missing shifts - warn if previous shift data not found in configured days back
-  const checkMissingShifts = useCallback(async () => {
-    if (!localStorage.getItem('token')) return;
-    const missing = [];
-    
-    const enabledShifts = config.shifts.filter(s => s.enabled);
-    const currentShiftIndex = enabledShifts.findIndex(s => s.id === currentShift?.id);
-    
-    if (currentShiftIndex === -1) return;
-    
-    // Determine which shift to check and which date to start from
-    let previousShift, startDate;
-    
-    if (currentShiftIndex === 0) {
-      // Current is first shift (A): check previous shift (B/C) from yesterday
-      previousShift = enabledShifts[enabledShifts.length - 1];
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      startDate = yesterday;
-    } else {
-      // Current is not first shift (B/C): check previous shift from today
-      previousShift = enabledShifts[currentShiftIndex - 1];
-      startDate = new Date();
-    }
-    
-    // Check N days back for previous shift data
-    const daysToCheck = config.checkDataDaysBack || 1;
-    let foundData = false;
-    
-    for (let i = 0; i < daysToCheck; i++) {
-      const checkDate = new Date(startDate);
-      checkDate.setDate(checkDate.getDate() - i);
-      const dateStr = checkDate.toISOString().slice(0, 10);
-      
-      try {
-        const res = await api.get('/api/oee/', { params: { entry_date: dateStr, shift: previousShift.id } });
-        if (res.data && res.data.length > 0) {
-          foundData = true;
-          break;
-        }
-      } catch { /* ignore */ }
-    }
-    
-    if (!foundData) {
-      const d2 = startDate;
-      const p = n => String(n).padStart(2,'0');
-      const dateLabel = `${p(d2.getDate())}-${p(d2.getMonth()+1)}-${d2.getFullYear()}`;
-      missing.push(`${previousShift.name} data is not updated for ${dateLabel}`);
-    }
-    
-    setMissingShifts(missing);
-  }, [config.shifts, config.checkDataDaysBack, currentShift]);
-
   useEffect(() => { fetchData(); }, [fetchData]);
-
-  useEffect(() => { 
-    checkMissingShifts(); 
-  }, []);
 
   useWebSocket(useCallback(msg => {
     if (msg.type === 'oee_updated') fetchData();
   }, [fetchData]));
+
+  const saveRunningCavity = async (entry) => {
+    const cav = parseInt(cavityEdit.value, 10);
+    if (!cav || cav < 1) {
+      alert('Running cavity must be at least 1');
+      return;
+    }
+    if (!entry.machine_id || !entry.entry_date || !entry.shift) {
+      alert('Cannot update running cavity without machine / date / shift');
+      return;
+    }
+    setCavitySaving(true);
+    try {
+      const r = await api.patch('/api/oee/running-cavity', {
+        machine_id: entry.machine_id,
+        entry_date: entry.entry_date,
+        shift: entry.shift,
+        running_cavity: cav,
+        plan_id: entry.plan_id || undefined,
+      });
+      setEntries((prev) => prev.map((e) => {
+        if (e.id !== entry.id) return e;
+        const next = {
+          ...e,
+          running_cavity: r.data.running_cavity ?? cav,
+          plan_id: r.data.plan_id ?? e.plan_id,
+        };
+        if (r.data.shot_count != null) next.shot_count = r.data.shot_count;
+        if (r.data.actual_qty != null) next.actual_qty = r.data.actual_qty;
+        if (r.data.possible_qty != null) next.possible_qty = r.data.possible_qty;
+        if (r.data.production_loss != null) next.production_loss = r.data.production_loss;
+        if (r.data.accp_qty != null) next.accp_qty = r.data.accp_qty;
+        if (r.data.ar != null) next.ar = r.data.ar;
+        if (r.data.pr != null) next.pr = r.data.pr;
+        if (r.data.qr != null) next.qr = r.data.qr;
+        if (r.data.oee != null) next.oee = r.data.oee;
+        return next;
+      }));
+      setCavityEdit({ id: null, value: '' });
+      fetchData();
+    } catch (err) {
+      alert(err.response?.data?.detail || err.message || 'Failed to update running cavity');
+    } finally {
+      setCavitySaving(false);
+    }
+  };
 
   const saveDefect = async (entry) => {
     if (defectEdit.value === '' || defectEdit.value < 0) return;
@@ -404,11 +395,6 @@ export default function Dashboard() {
         </button>
       )} />
 
-      {/* Missing shift alerts */}
-      {missingShifts.map(sh => (
-        <div key={sh} style={s.alert}>⚠ {sh}</div>
-      ))}
-
       {/* Filters */}
       <div style={s.filterBar}>
         <div style={s.viewBtns}>
@@ -508,7 +494,7 @@ export default function Dashboard() {
             <option key={machine.id} value={machine.id}>{machine.name}</option>
           ))}
         </select>
-        <input style={s.input} placeholder="Model or Current Operation" value={filters.search}
+        <input style={s.input} placeholder="Model / Work Order / Machine" value={filters.search}
           onChange={e => setFilters(p => ({ ...p, search: e.target.value }))} />
         <button style={s.dlBtn} onClick={downloadExcel}>⬇ Download Excel</button>
       </div>
@@ -586,7 +572,7 @@ export default function Dashboard() {
       <div style={s.tableWrap}>
         <table style={s.table}>
           <thead>
-            <tr>{['Date','Station','Machine','Shift','Work Order','Model / Variant','Current Operation','Next Operation','CT','Avail(min)','Op Time','Plan Qty','Possible','Actual','Prod Loss','Accp','Defect','AR%','PR%','QR%','OEE%','QC Edit'].map(h =>
+            <tr>{['Date','Station','Machine','Shift','Work Order','Model / Variant','Running Cavity','Shot Counts','CT','Avail(min)','Op Time','Plan Qty','Possible','Actual','Prod Loss','Accp','Defect','AR%','PR%','QR%','OEE%','QC Edit'].map(h =>
               <th key={h} style={s.th}>{h}</th>)}</tr>
           </thead>
           <tbody>
@@ -599,7 +585,12 @@ export default function Dashboard() {
               const oee = safeNum(e.oee);
               const isRealtime = e.source === 'realtime';
               const isEditing = defectEdit.id === e.id;
+              const isCavityEditing = cavityEdit.id === e.id;
               const showLog = defectLog.id === e.id;
+              const runCav = e.running_cavity != null && e.running_cavity !== '' ? Number(e.running_cavity) : null;
+              const shotCounts = e.shot_count != null
+                ? Number(e.shot_count)
+                : (runCav > 0 ? Math.floor(safeNum(e.actual_qty) / runCav) : safeNum(e.actual_qty));
               return (
                 <Fragment key={e.id}>
                   <tr style={s.tr}>
@@ -640,8 +631,59 @@ export default function Dashboard() {
                         </span>
                       ) : '—'}
                     </td>
-                    <td style={s.td}>{e.current_operation}</td>
-                    <td style={s.td}>{e.next_operation}</td>
+                    <td style={{
+                      ...s.td,
+                      background: 'rgba(245, 158, 11, 0.12)',
+                      boxShadow: 'inset 0 0 0 1px rgba(245, 158, 11, 0.45)',
+                      minWidth: 88,
+                    }}>
+                      {isCavityEditing ? (
+                        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                          <input
+                            type="number"
+                            min="1"
+                            style={{ ...s.input, width: 56, padding: '3px 6px', fontSize: 12, background: '#fffbeb', border: '1px solid #f59e0b' }}
+                            value={cavityEdit.value}
+                            autoFocus
+                            onChange={(ev) => setCavityEdit((p) => ({ ...p, value: ev.target.value }))}
+                            onKeyDown={(ev) => {
+                              if (ev.key === 'Enter') saveRunningCavity(e);
+                              if (ev.key === 'Escape') setCavityEdit({ id: null, value: '' });
+                            }}
+                          />
+                          <button
+                            disabled={cavitySaving}
+                            onClick={() => saveRunningCavity(e)}
+                            style={{ padding: '3px 8px', background: '#10b981', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}
+                          >✓</button>
+                          <button
+                            onClick={() => setCavityEdit({ id: null, value: '' })}
+                            style={{ padding: '3px 6px', background: t.surface2, color: t.textMuted, border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
+                          >✕</button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          title="Edit running cavity (Actual = Shot Counts × Running Cavity)"
+                          onClick={() => setCavityEdit({ id: e.id, value: String(runCav || 1) })}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#b45309',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            padding: 0,
+                            textDecoration: 'underline',
+                            textDecorationStyle: 'dotted',
+                          }}
+                        >
+                          {runCav != null && !Number.isNaN(runCav) ? runCav : '—'}
+                        </button>
+                      )}
+                    </td>
+                    <td style={s.td} title="Injection cycles — Actual = Shot Counts × Running Cavity">
+                      {Number.isFinite(shotCounts) ? shotCounts : '—'}
+                    </td>
                     <td style={s.td}>{formatCtSeconds(sumCt(e.process_time, e.loading_unloading))}</td>
                     <td style={s.td}>{e.available_shift_time}</td>
                     <td style={s.td}>{e.operating_time}</td>

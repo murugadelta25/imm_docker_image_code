@@ -27,6 +27,7 @@ from .routers import imm_opcua as imm_opcua_router
 from .routers import imm_dashboard as imm_dashboard_router
 from .routers import imm_history_dash as imm_history_dash_router
 from .routers import imm_nodered as imm_nodered_router
+from .routers import imm_energy as imm_energy_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -233,6 +234,7 @@ app.include_router(imm_opcua_router.router)
 app.include_router(imm_dashboard_router.router)
 app.include_router(imm_history_dash_router.router)
 app.include_router(imm_nodered_router.router)
+app.include_router(imm_energy_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"

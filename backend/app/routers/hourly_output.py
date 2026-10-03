@@ -1180,9 +1180,21 @@ def sync_plan_actuals_from_status_logs(
             and s['start'] >= shift_start
             and s['start'] < effective_end
         ]
-        computed = _countable_running_segments(
-            running_segs, ct if ct > 0 else None, threshold_ratio,
-        )
+        from ..imm_shot_counter import count_machine_shots
+        shot_count = count_machine_shots(db, mid, shift_start, effective_end)
+        # IMM: Actual parts = shot counts × running cavity (from plan mold snapshot)
+        running_cavity = 1
+        raw_details = getattr(target, "mold_details_json", None)
+        if raw_details:
+            try:
+                import json as _json
+                details = _json.loads(raw_details) if isinstance(raw_details, str) else (raw_details or {})
+                cav = details.get("running_cavity")
+                if cav not in (None, ""):
+                    running_cavity = max(1, int(cav))
+            except (TypeError, ValueError, Exception):
+                running_cavity = 1
+        computed = int(shot_count or 0) * int(running_cavity)
 
         new_actual = max(int(target.actual_qty or 0), int(computed or 0))
         if new_actual != int(target.actual_qty or 0):

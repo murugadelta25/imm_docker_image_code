@@ -56,16 +56,16 @@ function MachineZoneTile({ m, theme: t, onOpen }) {
   const oee = Number(tile.oee) || 0;
   const status = statusBarStyle(m, t);
   const rows = [
-    { label: 'Total Production', value: `${fmtQty(tile.total_production)} Unit` },
-    { label: 'Total Good Parts', value: `${fmtQty(tile.total_good)} Unit` },
-    { label: 'Total Bad Parts', value: `${fmtQty(tile.total_bad)} Unit` },
+    { label: 'Total Production (Unit)', value: fmtQty(tile.total_production) },
+    { label: 'Total Good Parts (Unit)', value: fmtQty(tile.total_good) },
+    { label: 'Total Bad Parts (Unit)', value: fmtQty(tile.total_bad) },
     {
-      label: 'Total Downtime',
-      value: tile.downtime_min == null ? '— Min.' : `${fmtQty(tile.downtime_min)} Min.`,
+      label: 'Total Downtime (Min.)',
+      value: tile.downtime_min == null ? '—' : fmtQty(tile.downtime_min),
     },
     {
-      label: 'Last Hr Bad Parts',
-      value: tile.last_hr_bad == null ? '— Unit' : `${fmtQty(tile.last_hr_bad)} Unit`,
+      label: 'Last Hr Bad Parts (Unit)',
+      value: tile.last_hr_bad == null ? '—' : fmtQty(tile.last_hr_bad),
     },
   ];
 
