@@ -206,6 +206,15 @@ def apply_shot_changes(
             fsm.state = "idle"
             fsm.updated_at = now
 
+    if shots:
+        try:
+            from .tool_service import apply_shot_mold_usage
+
+            apply_shot_mold_usage(db, machine_id, shots, source=source or "shot_fsm")
+        except Exception:
+            # Shot event already recorded — mold life sync must not roll back the shot
+            pass
+
     if commit and shots:
         db.commit()
     return shots
@@ -230,6 +239,29 @@ def count_shot_events(
         .scalar()
     )
     return int(n or 0)
+
+
+def batch_count_shot_events(
+    db: Session,
+    machine_ids: Iterable[int],
+    start: datetime,
+    end: datetime,
+) -> Dict[int, int]:
+    """Count ImmShotEvent rows per machine in [start, end)."""
+    mids = [int(x) for x in (machine_ids or []) if x is not None]
+    if not mids or end <= start:
+        return {}
+    rows = (
+        db.query(ImmShotEvent.machine_id, func.count(ImmShotEvent.id))
+        .filter(
+            ImmShotEvent.machine_id.in_(mids),
+            ImmShotEvent.recorded_at >= start,
+            ImmShotEvent.recorded_at < end,
+        )
+        .group_by(ImmShotEvent.machine_id)
+        .all()
+    )
+    return {int(mid): int(n or 0) for mid, n in rows}
 
 
 def count_shots_from_samples(

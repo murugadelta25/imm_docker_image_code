@@ -196,6 +196,7 @@ def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = N
     if shot_pulse:
         try:
             from .models import ImmShotEvent, now_ist
+            from .tool_service import apply_shot_mold_usage
 
             db.add(
                 ImmShotEvent(
@@ -206,9 +207,12 @@ def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = N
                     notes="EAP_Shot_Event from Node-RED",
                 )
             )
+            mold_usage = apply_shot_mold_usage(db, m.id, 1, source="nodered")
             db.commit()
             result["shots_detected"] = int(result.get("shots_detected") or 0) + 1
             result["shot_event"] = True
+            if mold_usage:
+                result["mold_usage"] = mold_usage
         except Exception as exc:
             result["shot_event_error"] = str(exc)
     try:

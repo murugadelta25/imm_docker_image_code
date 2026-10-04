@@ -40,7 +40,7 @@ function liveEntryDateForShift(shift) {
 
 const STATE_ROWS = [
   { key: 'running', label: 'Running' },
-  { key: 'expected', label: 'Exp Output' },
+  { key: 'expected', label: 'Possible output' },
   { key: 'ar', label: 'AR', pct: true },
   { key: 'pr', label: 'PR', pct: true },
   { key: 'qr', label: 'QR', pct: true },
@@ -601,10 +601,10 @@ function isDarkShadow(t) {
 
 function PerformanceLegend({ palette, t }) {
   const items = [
-    { label: '< 50% of expected', style: palette.perfRed },
-    { label: '< 60% of expected', style: palette.perfOrange },
-    { label: '> 75% of expected', style: palette.perfBlue },
-    { label: '> 90% of expected', style: palette.perfGreen },
+    { label: '< 50% of possible', style: palette.perfRed },
+    { label: '< 60% of possible', style: palette.perfOrange },
+    { label: '> 75% of possible', style: palette.perfBlue },
+    { label: '> 90% of possible', style: palette.perfGreen },
   ];
   const sep = <span style={{ borderLeft: `2px solid ${t.border}`, height: 20, margin: '0 6px' }} />;
   return (
@@ -626,7 +626,7 @@ function PerformanceLegend({ palette, t }) {
       <span style={{ fontSize: 11, color: t.textMuted, fontWeight: 700 }}>Rows:</span>
       {[
         ['Running', palette.running.rowLabel],
-        ['Expected', palette.expected.rowLabel],
+        ['Possible output', palette.expected.rowLabel],
         ['AR', palette.ar.rowLabel],
         ['PR', palette.pr.rowLabel],
         ['QR', palette.qr.rowLabel],
@@ -667,20 +667,23 @@ export default function MachineHourlyOutput() {
     shiftId: currentShift?.id || config.shifts.find(s => s.enabled)?.id || 'A',
     scope: 'all',
     stationId: '',
+    machineId: '',
     lineId: '',
     factoryId: '',
   };
   const [filters, setFilters] = usePersistedState(DRAFT_KEYS.hourlyOutput, defaultFilters);
   const {
-    entryDate, shiftId, scope, stationId, lineId, factoryId,
+    entryDate, shiftId, scope, stationId, machineId, lineId, factoryId,
   } = filters;
   const setEntryDate = (v) => setFilters((p) => ({ ...p, entryDate: typeof v === 'function' ? v(p.entryDate) : v }));
   const setShiftId = (v) => setFilters((p) => ({ ...p, shiftId: v }));
   const setScope = (v) => setFilters((p) => ({ ...p, scope: v }));
-  const setStationId = (v) => setFilters((p) => ({ ...p, stationId: v }));
+  const setStationId = (v) => setFilters((p) => ({ ...p, stationId: v, machineId: '' }));
+  const setMachineId = (v) => setFilters((p) => ({ ...p, machineId: v }));
   const setLineId = (v) => setFilters((p) => ({ ...p, lineId: v }));
   const setFactoryId = (v) => setFilters((p) => ({ ...p, factoryId: v }));
   const [stations, setStations] = useState([]);
+  const [allMachines, setAllMachines] = useState([]);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [fetchErr, setFetchErr] = useState('');
@@ -695,7 +698,31 @@ export default function MachineHourlyOutput() {
 
   useEffect(() => {
     api.get('/api/stations/').then(r => setStations(r.data || [])).catch(() => {});
+    api.get('/api/machines/').then(r => setAllMachines(Array.isArray(r.data) ? r.data : [])).catch(() => {});
   }, []);
+
+  const stationMachines = useMemo(() => {
+    if (!stationId) return [];
+    const sid = parseInt(stationId, 10);
+    return allMachines
+      .filter((m) => {
+        if (Number(m.station_id) !== sid) return false;
+        const t = String(m.machine_type || '').toUpperCase();
+        const n = String(m.name || '').toUpperCase();
+        // Hide energy utilities from hourly production picker
+        if (t === 'ENERGY' || n.startsWith('EM_') || n.includes('ENERGY')) return false;
+        return true;
+      })
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+  }, [allMachines, stationId]);
+
+  // Drop stale machine selection when station list changes
+  useEffect(() => {
+    if (!machineId) return;
+    if (!stationMachines.some((m) => String(m.id) === String(machineId))) {
+      setMachineId('');
+    }
+  }, [stationMachines, machineId]);
 
   // After site config loads, reset once to current shift + live entry date.
   // Do not use the first mount with DEFAULT_CONFIG (wrong shift windows).
@@ -728,10 +755,11 @@ export default function MachineHourlyOutput() {
   const buildParams = useCallback(() => {
     const p = { entry_date: entryDate, shift: shiftId, scope };
     if (scope === 'station' && stationId) p.station_id = parseInt(stationId, 10);
+    if (scope === 'station' && machineId) p.machine_id = parseInt(machineId, 10);
     if (scope === 'line' && lineId) p.line_id = lineId;
     if (scope === 'factory' && factoryId) p.factory_id = factoryId;
     return p;
-  }, [entryDate, shiftId, scope, stationId, lineId, factoryId]);
+  }, [entryDate, shiftId, scope, stationId, machineId, lineId, factoryId]);
 
   const fetchData = useCallback(async () => {
     if (!entryDate || !shiftId || !isValidDate(entryDate)) return;
@@ -870,6 +898,7 @@ export default function MachineHourlyOutput() {
             ...p,
             scope: e.target.value,
             stationId: '',
+            machineId: '',
             lineId: '',
             factoryId: '',
           }));
@@ -892,10 +921,24 @@ export default function MachineHourlyOutput() {
           </select>
         )}
         {scope === 'station' && (
-          <select style={s.input} value={stationId} onChange={e => setStationId(e.target.value)}>
-            <option value="">Select station</option>
-            {stations.map(st => <option key={st.id} value={st.id}>{st.display_name || st.name}</option>)}
-          </select>
+          <>
+            <select style={s.input} value={stationId} onChange={e => setStationId(e.target.value)}>
+              <option value="">Select station</option>
+              {stations.map(st => <option key={st.id} value={st.id}>{st.display_name || st.name}</option>)}
+            </select>
+            <select
+              style={s.input}
+              value={machineId}
+              disabled={!stationId}
+              onChange={e => setMachineId(e.target.value)}
+              title={!stationId ? 'Select a station first' : 'Select machine for detailed hourly production'}
+            >
+              <option value="">All machines in station</option>
+              {stationMachines.map((m) => (
+                <option key={m.id} value={m.id}>{m.name}</option>
+              ))}
+            </select>
+          </>
         )}
       </div>
 

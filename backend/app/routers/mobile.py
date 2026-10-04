@@ -764,7 +764,7 @@ def _apply_loss_machine_status(
             ModelChangeRequest.status.in_(["approved", "in_progress"]),
         ).first()
         if active_bd:
-            live = "breakdown"
+            live = "setting_change" if getattr(active_bd, "downtime_type", None) == "planned" else "breakdown"
         elif m.status == "alarm":
             live = "alarm"
         elif active_mc:

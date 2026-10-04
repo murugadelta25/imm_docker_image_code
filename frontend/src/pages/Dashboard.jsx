@@ -5,11 +5,13 @@ import { useWebSocket } from '../api/useWebSocket';
 import PageHeader from '../components/PageHeader';
 import Donut3D, { DONUT_CANVAS } from '../components/charts/Donut3D';
 import ProductionVsPossibleChart from '../components/charts/ProductionVsPossibleChart';
+import RejectionLogModal from '../components/RejectionLogModal';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import { downloadBlobResponse } from '../utils/downloadBlob';
 import { formatCtSeconds, sumCt } from '../utils/cycleTime';
 import { useConfig, getCurrentShift } from '../context/ConfigContext';
+import { formatRejectionNote } from '../constants/rejectionReasons';
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const AR_COLOR = '#4fc3f7';
@@ -122,6 +124,9 @@ export default function Dashboard() {
   const [defectEdit, setDefectEdit] = useState({ id: null, value: '', note: '' });
   const [defectSaving, setDefectSaving] = useState(false);
   const [defectLog, setDefectLog] = useState({ id: null, records: [] });
+  const [rejectionModal, setRejectionModal] = useState({
+    open: false, entry: null, initialJson: null, maxTotal: null, error: '',
+  });
   const [cavityEdit, setCavityEdit] = useState({ id: null, value: '' });
   const [cavitySaving, setCavitySaving] = useState(false);
   const [kpiDialog, setKpiDialog] = useState({ open: false, loading: false, data: null });
@@ -279,6 +284,76 @@ export default function Dashboard() {
     }
   };
 
+  const openRejectionLog = async (entry) => {
+    let initialJson = entry.rejection_json || null;
+    let maxTotal = safeNum(entry.actual_qty);
+    try {
+      if (entry.machine_id && entry.entry_date && entry.shift) {
+        const r = await api.get('/api/oee/rejection/by-machine', {
+          params: {
+            machine_id: entry.machine_id,
+            entry_date: entry.entry_date,
+            shift: entry.shift,
+          },
+        });
+        initialJson = r.data?.rejection_json || initialJson;
+        if (r.data?.actual_qty != null) maxTotal = safeNum(r.data.actual_qty);
+      }
+    } catch { /* use row defaults */ }
+    setRejectionModal({
+      open: true,
+      entry,
+      initialJson,
+      maxTotal,
+      error: '',
+    });
+  };
+
+  const saveRejectionLog = async ({ quantities, total }) => {
+    const entry = rejectionModal.entry;
+    if (!entry) return;
+    setDefectSaving(true);
+    setRejectionModal((p) => ({ ...p, error: '' }));
+    try {
+      const payload = {
+        defect_qty: total,
+        note: formatRejectionNote(quantities),
+        rejection_reasons: quantities,
+      };
+      const r = entry.source === 'realtime' || !Number.isFinite(Number(entry.id)) || String(entry.id).startsWith('rt-')
+        ? await api.patch('/api/oee/defect/by-machine', {
+            machine_id: entry.machine_id,
+            entry_date: entry.entry_date,
+            shift: entry.shift,
+            ...payload,
+          })
+        : await api.patch(`/api/oee/${entry.id}/defect`, payload);
+      setEntries(prev => prev.map(e => e.id === entry.id
+        ? {
+            ...e,
+            id: r.data.id ?? e.id,
+            source: 'manual',
+            defect_qty: r.data.defect_qty,
+            accp_qty: r.data.accp_qty,
+            qr: r.data.qr,
+            oee: r.data.oee,
+            rejection_json: r.data.rejection_json,
+          }
+        : e
+      ));
+      setRejectionModal({ open: false, entry: null, initialJson: null, maxTotal: null, error: '' });
+      setDefectEdit({ id: null, value: '', note: '' });
+      fetchData();
+    } catch (err) {
+      setRejectionModal((p) => ({
+        ...p,
+        error: err.response?.data?.detail || err.message || 'Failed to save rejection log',
+      }));
+    } finally {
+      setDefectSaving(false);
+    }
+  };
+
   const saveDefect = async (entry) => {
     if (defectEdit.value === '' || defectEdit.value < 0) return;
     setDefectSaving(true);
@@ -359,6 +434,9 @@ export default function Dashboard() {
       avg_pr: parseFloat(avgPr.toFixed(2)),
       avg_qr: parseFloat(avgQr.toFixed(2)),
       avg_oee: parseFloat(avgOee.toFixed(2)),
+      // Overall plant efficiency = Σ machine OEE / number of machines
+      plant_oee: parseFloat(avgOee.toFixed(2)),
+      machine_count: n,
       total_actual: allEntries.reduce((s, e) => s + safeNum(e.actual_qty), 0),
       total_accp: allEntries.reduce((s, e) => s + safeNum(e.accp_qty), 0),
       total_defect: allEntries.reduce((s, e) => s + safeNum(e.defect_qty), 0),
@@ -506,8 +584,8 @@ export default function Dashboard() {
             { label: 'Availability (AR)', value: `${Math.round(safeNum(mergedSummary.avg_ar))}%`, color: '#0ea5e9' },
             { label: 'Performance (PR)', value: `${Math.round(safeNum(mergedSummary.avg_pr))}%`, color: '#8b5cf6' },
             { label: 'Quality (QR)', value: `${Math.round(safeNum(mergedSummary.avg_qr))}%`, color: '#10b981' },
-            { label: 'OEE', value: `${Math.round(safeNum(mergedSummary.avg_oee))}%`,
-              color: safeNum(mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
+            { label: 'Plant OEE', value: `${Math.round(safeNum(mergedSummary.plant_oee ?? mergedSummary.avg_oee))}%`,
+              color: safeNum(mergedSummary.plant_oee ?? mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.plant_oee ?? mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
             { label: 'Total Produced', value: mergedSummary.total_actual ?? 0, color: '#64748b' },
             { label: 'Accepted Qty', value: mergedSummary.total_accp ?? 0, color: '#10b981' },
             { label: 'Defects', value: mergedSummary.total_defect ?? 0, color: '#ef4444' },
@@ -542,7 +620,7 @@ export default function Dashboard() {
                   { key: 'avg_ar',  label: 'AR',  color: AR_COLOR },
                   { key: 'avg_pr',  label: 'PR',  color: PR_COLOR },
                   { key: 'avg_qr',  label: 'QR',  color: QR_COLOR },
-                  { key: 'avg_oee', label: 'OEE', color: safeNum(mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
+                  { key: 'avg_oee', label: 'Plant OEE', color: safeNum(mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
                 ].map(({ key, label, color }) => {
                   const val = safeNum(mergedSummary[key]);
                   return (
@@ -731,10 +809,10 @@ export default function Dashboard() {
                     <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
                       <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                         {!isEditing && (
-                          <button onClick={() => setDefectEdit({ id: e.id, value: String(e.defect_qty || 0), note: '' })}
+                          <button onClick={() => openRejectionLog(e)}
                             style={{ padding: '3px 8px', background: '#f59e0b', color: '#fff', border: 'none',
                                      borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}
-                            title="Update defect qty after QC">✏ QC</button>
+                            title="Open Rejection Log (QC)">✏ QC</button>
                         )}
                         <button onClick={() => loadDefectLog(e)}
                           style={{ padding: '3px 8px', background: showLog ? t.accent : t.surface2,
@@ -918,20 +996,22 @@ export default function Dashboard() {
                       background: t.surface2, borderRadius: 8, padding: '10px 14px',
                       border: `1px solid ${t.border}`
                     }}>
+                      <span style={{ fontWeight: 600, color: t.accent }}>Scheduled</span>
+                      <span>= Shift start → now</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>Planned Prod Time</span>
+                      <span>= Scheduled − Planned DT (Breakdown / Model Change)</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>Operating Time</span>
+                      <span>= Planned Prod Time − Unplanned DT (Breakdown)</span>
                       <span style={{ fontWeight: 600, color: t.accent }}>AR</span>
-                      <span>= (OpTime − Downtime) / OpTime</span>
+                      <span>= Operating Time / Planned Prod Time</span>
                       <span style={{ fontWeight: 600, color: t.accent }}>PR</span>
-                      <span>= ActualOutput / ExpectedOutput</span>
+                      <span>= (Units × Set CT) / Operating Time · Units = Shots × Running Cavity</span>
                       <span style={{ fontWeight: 600, color: t.accent }}>QR</span>
-                      <span>= GoodUnits / TotalUnits</span>
+                      <span>= Good Units / Total Units</span>
                       <span style={{ fontWeight: 600, color: t.accent }}>OEE</span>
                       <span>= AR × PR × QR</span>
-                      <span style={{ fontWeight: 600, color: t.accent }}>MUR</span>
-                      <span>= ActualProdTime / AvailTime</span>
-                      <span style={{ fontWeight: 600, color: t.accent }}>Yield</span>
-                      <span>= ActualOutput / TheoreticalOutput</span>
-                      <span style={{ fontWeight: 600, color: t.accent }}>TEEP</span>
-                      <span>= OEE × MUR</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>Plant OEE</span>
+                      <span>= Σ Machine OEE / Number of Machines</span>
                     </div>
                   </div>
                 </>
@@ -940,6 +1020,20 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      <RejectionLogModal
+        open={rejectionModal.open}
+        theme={t}
+        subtitle={rejectionModal.entry
+          ? `${getMachineLabel(rejectionModal.entry.machine_id)} · ${rejectionModal.entry.entry_date} · Shift ${rejectionModal.entry.shift}`
+          : ''}
+        initialJson={rejectionModal.initialJson}
+        maxTotal={rejectionModal.maxTotal}
+        busy={defectSaving}
+        error={rejectionModal.error}
+        onClose={() => setRejectionModal({ open: false, entry: null, initialJson: null, maxTotal: null, error: '' })}
+        onSave={saveRejectionLog}
+      />
     </div>
   );
 }

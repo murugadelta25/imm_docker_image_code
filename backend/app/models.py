@@ -181,6 +181,7 @@ class OEEEntry(Base):
     actual_qty = Column(Integer)
     accp_qty = Column(Integer)
     defect_qty = Column(Integer)
+    rejection_json = Column(Text)  # {"Short Fill": 18, ...} latest QC rejection breakdown
     ar = Column(Numeric(6, 2))
     pr = Column(Numeric(6, 2))
     qr = Column(Numeric(6, 2))
@@ -461,6 +462,7 @@ class OEEDefectLog(Base):
     after_qr          = Column(Numeric(5,2))
     after_oee         = Column(Numeric(5,2))
     note              = Column(String(500))
+    rejection_json    = Column(Text)  # per-reason quantities at this QC update
 
 class BreakdownTicket(Base):
     __tablename__ = "breakdown_tickets"
@@ -469,6 +471,9 @@ class BreakdownTicket(Base):
     raised_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     acknowledged_by = Column(Integer, ForeignKey("users.id"))
     description = Column(Text)
+    downtime_type = Column(String(20))  # planned | unplanned
+    downtime_reason = Column(String(100))
+    raised_by_name = Column(String(100))  # free-text override when not selecting a user
     status = Column(Enum("raised", "acknowledged", "in_progress", "resolved"), default="raised")
     ack_time = Column(DateTime)
     start_troubleshoot = Column(DateTime)
@@ -1284,3 +1289,53 @@ def ensure_factory_schema(bind=None):
 
 
 ensure_factory_schema()
+
+
+def ensure_breakdown_schema(bind=None):
+    """Add downtime reason / raised-by-name columns to breakdown_tickets."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import text
+        _add_column_if_missing(
+            bind, text, "breakdown_tickets", "downtime_type",
+            "downtime_type VARCHAR(20) NULL"
+        )
+        _add_column_if_missing(
+            bind, text, "breakdown_tickets", "downtime_reason",
+            "downtime_reason VARCHAR(100) NULL"
+        )
+        _add_column_if_missing(
+            bind, text, "breakdown_tickets", "raised_by_name",
+            "raised_by_name VARCHAR(100) NULL"
+        )
+        return True
+    except Exception as exc:
+        print(f"[WARN] ensure_breakdown_schema failed: {exc}")
+        return False
+
+
+ensure_breakdown_schema()
+
+
+def ensure_rejection_schema(bind=None):
+    """Add rejection_json columns for QC Rejection Log breakdown."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import text
+        _add_column_if_missing(
+            bind, text, "oee_entries", "rejection_json",
+            "rejection_json TEXT NULL"
+        )
+        _add_column_if_missing(
+            bind, text, "oee_defect_log", "rejection_json",
+            "rejection_json TEXT NULL"
+        )
+        return True
+    except Exception as exc:
+        print(f"[WARN] ensure_rejection_schema failed: {exc}")
+        return False
+
+
+ensure_rejection_schema()

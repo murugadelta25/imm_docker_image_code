@@ -504,6 +504,7 @@ export default function ToolManagement() {
             <li>Set <strong>Life cycles limit</strong> (e.g. 50000 / 100000) and IMM fields (Part No., cavities, shot/part/runner weights, target/shift).</li>
             <li>Add multiple <strong>Cavity Names</strong> (e.g. Base, Cover) and enable only the one in use — remaining production logs against that cavity/part.</li>
             <li>Production actual qty on a work-order plan adds cycles to mapped molds and records cavity + location.</li>
+            <li>Each IMM shot also increments Mold Monitoring <strong>Uses</strong> and this mold&apos;s life (History shows event type <strong>shot</strong>).</li>
             <li>Below min stock or near EOL → alert in this page + header notification (can suppress).</li>
             <li>At EOL the mold is blocked for planning until <strong>Correction</strong> (temp continue) or <strong>Replace</strong> (reset life, consume 1 stock).</li>
             <li><strong>Download Report</strong> exports Excel (inventory / alerts / consumption).</li>

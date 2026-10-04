@@ -45,12 +45,14 @@ def _compute_status(machine: Machine, db: Session) -> str:
     if machine.status == "offline":
         return "offline"
 
-    # 2. Active breakdown ticket → breakdown
+    # 2. Active downtime ticket → breakdown (unplanned) or setting_change (planned)
     active_bd = db.query(BreakdownTicket).filter(
         BreakdownTicket.machine_id == machine.id,
         BreakdownTicket.status.in_(["raised", "acknowledged", "in_progress"])
     ).first()
     if active_bd:
+        if getattr(active_bd, "downtime_type", None) == "planned":
+            return "setting_change"
         return "breakdown"
 
     # 3. PLC alarm

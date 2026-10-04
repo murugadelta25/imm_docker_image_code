@@ -22,9 +22,13 @@ from .models import (
 
 CATALOG_PATH = Path(__file__).resolve().parent / "data" / "imm_opcua_parameters.json"
 
-# Max age of Motor/Heater samples before a machine is treated as Offline.
+# Max age of Motor/Heater samples before OPC UA machines are treated as Offline.
 # Node-RED often pushes on-change only, so keep a generous window (default 30 min).
 IMM_STATUS_MAX_AGE_SEC = int(os.getenv("IMM_STATUS_MAX_AGE_SEC", "1800"))
+
+# PLC status-tag machines (IMM17/18): Offline when Motor/Heater not refreshed for > one shift.
+# Default 12h (= typical A/B shift); override with IMM_PLC_STATUS_STALE_SEC.
+IMM_PLC_STATUS_STALE_SEC = int(os.getenv("IMM_PLC_STATUS_STALE_SEC", str(12 * 3600)))
 
 # After Actual_Charging_Time / Actual_Injection_Time value changes, show Running this long
 IMM_CYCLE_ACTIVITY_SEC = int(os.getenv("IMM_CYCLE_ACTIVITY_SEC", "120"))
@@ -36,6 +40,11 @@ _STATUS_ALIAS_RE = re.compile(
     r"^(?:IMM[_\s]?\d+[_\s]?)?(Motor|Heater|Injection|Refilling|Connection)_?[Ss]tatus$",
     re.IGNORECASE,
 )
+
+# IMM17 / IMM18 — PLC / SIE status-tag category (Motor/Heater/Injection/Refilling)
+_PLC_STATUS_NAME_RE = re.compile(r"^IMM[_]?1[78]$", re.IGNORECASE)
+# IMM_07..IMM_11 — Dia Edge / OPC UA parameter category
+_OPCUA_IMM_NAME_RE = re.compile(r"^IMM[_]?0?(?:[7-9]|1[01])$", re.IGNORECASE)
 
 # Overview / card highlights from Dia Edge parameter list
 HIGHLIGHT_KEYS = (
@@ -385,8 +394,17 @@ def sync_imm_status_log(db: Session, machine_id: int, source: str = "imm_opcua")
     from .models import Machine, MachineStatusLog
     from .routers.machines import _log_status
 
+    m = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not m:
+        return None
+
     hl = highlights_for_machine(db, machine_id)
-    live = eap_imm_status_from_opcua_highlights(hl)  # running|available|idle|stop|offline
+    live = eap_imm_status_from_opcua_highlights(
+        hl,
+        machine_name=m.name,
+        plc_source=getattr(m, "plc_source", None),
+        db=db,
+    )  # running|available|idle|stop|offline
     # machine.status enum has no stop/available — map for Machine row only
     machine_status = {
         "running": "running",
@@ -397,10 +415,6 @@ def sync_imm_status_log(db: Session, machine_id: int, source: str = "imm_opcua")
     }.get(live, "offline")
     # Log keeps available/stop so hit-rate can treat running ≠ available
     log_status = live if live in ("running", "available", "idle", "stop", "offline") else machine_status
-
-    m = db.query(Machine).filter(Machine.id == machine_id).first()
-    if not m:
-        return None
 
     last = (
         db.query(MachineStatusLog)
@@ -517,15 +531,50 @@ def _highlight_recorded_at(entry: dict) -> Optional[datetime]:
         return None
 
 
-def _status_samples_stale(opcua: dict, max_age_sec: int = IMM_STATUS_MAX_AGE_SEC) -> bool:
-    """True when Motor/Heater samples are too old to trust as live.
+def machine_imm_category(machine_name: Optional[str] = None, plc_source: Optional[str] = None) -> str:
+    """Return 'plc_status' (IMM17/18) or 'opcua' (IMM_07..11 / Dia Edge)."""
+    src = str(plc_source or "").strip().lower()
+    if src in ("plc", "status", "sie_status", "nodered_status", "status_tags"):
+        return "plc_status"
+    if src in ("opcua", "diaedge", "opc", "opc-ua"):
+        return "opcua"
+    n = re.sub(r"[\s\-]+", "", str(machine_name or "").strip().upper())
+    if _PLC_STATUS_NAME_RE.match(n):
+        return "plc_status"
+    if _OPCUA_IMM_NAME_RE.match(n):
+        return "opcua"
+    # Heuristic: machines that only stream status tags behave like PLC category
+    return "opcua"
 
-    If Connection_Status is present and ON/true, treat Motor/Heater as live even when
-    Node-RED skipped unchanged pushes (recorded_at not refreshed).
-    """
-    if "Connection_Status" in opcua and _opcua_flag(opcua, "Connection_Status"):
-        return False
 
+def _one_shift_stale_sec(db: Optional[Session] = None) -> int:
+    """Longest enabled shift duration (seconds), fallback IMM_PLC_STATUS_STALE_SEC."""
+    if db is None:
+        return max(3600, IMM_PLC_STATUS_STALE_SEC)
+    try:
+        from .routers.config import _load_config
+        from .routers.hourly_output import _shift_window
+
+        cfg = _load_config(db)
+        shifts = [s for s in (cfg.get("shifts") or []) if s.get("enabled", True)]
+        if not shifts:
+            return max(3600, IMM_PLC_STATUS_STALE_SEC)
+        today = now_ist().date()
+        longest = 0
+        for sh in shifts:
+            try:
+                start, end = _shift_window(today, sh)
+                longest = max(longest, int((end - start).total_seconds()))
+            except Exception:
+                continue
+        if longest > 0:
+            return longest
+    except Exception:
+        pass
+    return max(3600, IMM_PLC_STATUS_STALE_SEC)
+
+
+def _motor_heater_ages_sec(opcua: dict) -> List[float]:
     now = now_ist().replace(tzinfo=None)
     ages = []
     for key in ("Motor_Status", "Heater_Status"):
@@ -535,8 +584,31 @@ def _status_samples_stale(opcua: dict, max_age_sec: int = IMM_STATUS_MAX_AGE_SEC
         if ts is None:
             continue
         ages.append((now - ts).total_seconds())
-    if not ages:
+    return ages
+
+
+def _status_samples_stale(
+    opcua: dict,
+    max_age_sec: int = IMM_STATUS_MAX_AGE_SEC,
+    *,
+    allow_connection_bypass: bool = True,
+) -> bool:
+    """True when Motor/Heater samples are too old to trust as live.
+
+    For OPC UA machines, Connection_Status ON can bypass age (on-change pushes).
+    For PLC status-tag machines (IMM17/18), bypass is disabled — stale Motor/Heater
+    after one shift ⇒ Offline.
+    """
+    if allow_connection_bypass and "Connection_Status" in opcua and _opcua_flag(opcua, "Connection_Status"):
         return False
+
+    ages = _motor_heater_ages_sec(opcua)
+    if not ages:
+        # No usable timestamps → treat as stale for PLC; OPC UA path only reaches
+        # here when Motor/Heater keys exist but lack recorded_at.
+        return True
+    # Offline only when neither Motor nor Heater was refreshed within the window
+    # (freshest sample still older than max_age).
     return min(ages) > max_age_sec
 
 
@@ -555,38 +627,71 @@ def _cycle_activity_recent(opcua: dict, max_age_sec: int = IMM_CYCLE_ACTIVITY_SE
     return False
 
 
-def eap_imm_status_from_opcua_highlights(opcua: dict) -> str:
+def eap_imm_status_from_opcua_highlights(
+    opcua: dict,
+    *,
+    machine_name: Optional[str] = None,
+    plc_source: Optional[str] = None,
+    category: Optional[str] = None,
+    stale_sec: Optional[int] = None,
+    db: Optional[Session] = None,
+) -> str:
     """Derive EAP IMM machine status from latest OPC UA / Node-RED highlight values.
 
-    Same rule for every IMM (IMM17, IMM18, …):
-      Motor ON + Heater ON + recent Charging/Injection time change → running
-      Motor ON + Heater ON (powered, not cycling)                 → available
-      only one of Motor/Heater ON                                   → idle
-      both OFF                                                     → stop
-
-    Offline when Motor/Heater tags are missing or samples are too old to trust.
-    Prefixed tags (IMM18_Motor_status) normalize to Motor_Status / Heater_Status.
+    Categories:
+      plc_status (IMM17/IMM18):
+        Motor/Heater not updated for > one shift → offline
+        Motor ON + Heater ON → available (running if Injection recently true)
+        Motor/Heater mixed → idle; both OFF → stop
+      opcua (IMM_07..IMM_11):
+        Motor ON + Heater ON + recent Charging/Injection time change → running
+        Motor ON + Heater ON (powered, not cycling)                 → available
+        Offline when Motor/Heater missing or older than IMM_STATUS_MAX_AGE_SEC
+        (Connection_Status may keep OPC UA tags alive across on-change gaps)
     """
     if not opcua:
         return "offline"
 
+    cat = (category or machine_imm_category(machine_name, plc_source) or "opcua").strip().lower()
     has_motor = "Motor_Status" in opcua
     has_heater = "Heater_Status" in opcua
+    if not (has_motor and has_heater):
+        return "offline"
 
-    if has_motor and has_heater:
-        if _status_samples_stale(opcua):
+    if cat == "plc_status":
+        max_age = int(stale_sec if stale_sec is not None else _one_shift_stale_sec(db))
+        if _status_samples_stale(opcua, max_age, allow_connection_bypass=False):
             return "offline"
         motor = _opcua_flag(opcua, "Motor_Status")
         heater = _opcua_flag(opcua, "Heater_Status")
         if motor and heater:
-            if _cycle_activity_recent(opcua):
-                return "running"
+            # PLC stream has no reliable CT tags — Injection_Status true ≈ cycling
+            inj = opcua.get("Injection_Status")
+            if inj is not None:
+                inj_ts = _highlight_recorded_at(inj)
+                inj_on = _opcua_flag(opcua, "Injection_Status")
+                if inj_on and inj_ts is not None:
+                    age = (now_ist().replace(tzinfo=None) - inj_ts).total_seconds()
+                    if age <= IMM_CYCLE_ACTIVITY_SEC:
+                        return "running"
             return "available"
         if motor or heater:
             return "idle"
         return "stop"
 
-    return "offline"
+    # OPC UA / Dia Edge machines
+    max_age = int(stale_sec if stale_sec is not None else IMM_STATUS_MAX_AGE_SEC)
+    if _status_samples_stale(opcua, max_age, allow_connection_bypass=True):
+        return "offline"
+    motor = _opcua_flag(opcua, "Motor_Status")
+    heater = _opcua_flag(opcua, "Heater_Status")
+    if motor and heater:
+        if _cycle_activity_recent(opcua):
+            return "running"
+        return "available"
+    if motor or heater:
+        return "idle"
+    return "stop"
 
 
 def build_node_id(raw: Optional[str], namespace_index: int = 2) -> Optional[str]:

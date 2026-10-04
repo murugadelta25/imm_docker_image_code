@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import extract, or_
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from calendar import monthrange
@@ -17,6 +17,34 @@ from pydantic import BaseModel
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/oee", tags=["oee"])
+
+REJECTION_REASONS = [
+    "Short Fill", "Sink Mark", "Burn Mark", "Flow Mark", "Silver Mark",
+    "Warpage", "Blow Holes", "Black Spots", "Colour Variation", "Startup Rejection",
+    "Parting Lines", "Flash", "Part Damage", "Bubble Mark", "Shrinkage",
+    "Patch Mark", "Oil Mark", "Gloss", "Other",
+]
+
+
+def _normalize_rejection_reasons(raw: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    out = {r: 0 for r in REJECTION_REASONS}
+    if not raw or not isinstance(raw, dict):
+        return out
+    for key, val in raw.items():
+        name = str(key).strip()
+        if name not in out:
+            continue
+        try:
+            n = int(val or 0)
+        except (TypeError, ValueError):
+            n = 0
+        out[name] = max(0, n)
+    return out
+
+
+def _rejection_note(reasons: Dict[str, int]) -> str:
+    parts = [f"{k}: {v}" for k, v in reasons.items() if v > 0]
+    return "; ".join(parts)
 
 class OEECreate(BaseModel):
     entry_date: date
@@ -92,6 +120,188 @@ def _calculate_display_rates(ar_raw: float, pr_raw: float, qr_raw: float) -> dic
         "pr": pr,
         "qr": qr,
         "oee": oee,
+    }
+
+
+def _overlap_minutes(
+    start: Optional[datetime],
+    end: Optional[datetime],
+    window_start: datetime,
+    window_end: datetime,
+) -> float:
+    """Minutes of [start, end) overlapping [window_start, window_end). Open end → window_end."""
+    if start is None:
+        return 0.0
+    if getattr(start, "tzinfo", None) is not None:
+        start = start.replace(tzinfo=None)
+    if end is not None and getattr(end, "tzinfo", None) is not None:
+        end = end.replace(tzinfo=None)
+    lo = max(start, window_start)
+    hi = min(end or window_end, window_end)
+    if hi <= lo:
+        return 0.0
+    return (hi - lo).total_seconds() / 60.0
+
+
+def _batch_breakdown_downtime_min(
+    db: Session,
+    machine_ids: List[int],
+    window_start: datetime,
+    window_end: datetime,
+) -> dict:
+    """Planned / unplanned downtime minutes from Breakdown + Model Change dashboards.
+
+    Unplanned → BreakdownTicket durations in the window.
+    Planned   → ModelChangeRequest / setting_change durations in the window.
+    Also folds MachineStatusLog segments (breakdown/alarm vs setting_change) so
+    live status from the Breakdown screen is included.
+    """
+    from ..models import BreakdownTicket, ModelChangeRequest
+
+    mids = [int(x) for x in (machine_ids or []) if x is not None]
+    empty = {mid: {"planned_dt_min": 0.0, "unplanned_dt_min": 0.0} for mid in mids}
+    if not mids or window_end <= window_start:
+        return empty
+
+    out = {mid: {"planned_dt_min": 0.0, "unplanned_dt_min": 0.0} for mid in mids}
+
+    tickets = (
+        db.query(BreakdownTicket)
+        .filter(
+            BreakdownTicket.machine_id.in_(mids),
+            BreakdownTicket.created_at.isnot(None),
+            BreakdownTicket.created_at < window_end,
+            or_(
+                BreakdownTicket.resolved_time.is_(None),
+                BreakdownTicket.resolved_time > window_start,
+            ),
+        )
+        .all()
+    )
+    for tk in tickets:
+        mid = int(tk.machine_id)
+        if mid not in out:
+            continue
+        mins = _overlap_minutes(
+            tk.created_at, tk.resolved_time, window_start, window_end
+        )
+        if getattr(tk, "downtime_type", None) == "planned":
+            out[mid]["planned_dt_min"] += mins
+        else:
+            out[mid]["unplanned_dt_min"] += mins
+
+    mcrs = (
+        db.query(ModelChangeRequest)
+        .filter(
+            ModelChangeRequest.machine_id.in_(mids),
+            ModelChangeRequest.status.in_(("approved", "in_progress", "completed")),
+            ModelChangeRequest.start_time.isnot(None),
+            ModelChangeRequest.start_time < window_end,
+            or_(
+                ModelChangeRequest.end_time.is_(None),
+                ModelChangeRequest.end_time > window_start,
+            ),
+        )
+        .all()
+    )
+    for mcr in mcrs:
+        mid = int(mcr.machine_id)
+        if mid not in out:
+            continue
+        out[mid]["planned_dt_min"] += _overlap_minutes(
+            mcr.start_time, mcr.end_time, window_start, window_end
+        )
+
+    # Status-log segments mirror Breakdown dashboard machine states
+    logs = (
+        db.query(MachineStatusLog)
+        .filter(
+            MachineStatusLog.machine_id.in_(mids),
+            MachineStatusLog.changed_at >= window_start - timedelta(hours=12),
+            MachineStatusLog.changed_at < window_end + timedelta(minutes=1),
+        )
+        .order_by(MachineStatusLog.machine_id, MachineStatusLog.changed_at, MachineStatusLog.id)
+        .all()
+    )
+    by_mid: dict = {}
+    for lg in logs:
+        by_mid.setdefault(int(lg.machine_id), []).append(lg)
+
+    for mid, rows in by_mid.items():
+        if mid not in out:
+            continue
+        planned_seg = 0.0
+        unplanned_seg = 0.0
+        for i, lg in enumerate(rows):
+            seg_start = lg.changed_at
+            if getattr(seg_start, "tzinfo", None) is not None:
+                seg_start = seg_start.replace(tzinfo=None)
+            seg_end = rows[i + 1].changed_at if i + 1 < len(rows) else window_end
+            if getattr(seg_end, "tzinfo", None) is not None:
+                seg_end = seg_end.replace(tzinfo=None)
+            st = (lg.status or "").lower()
+            mins = _overlap_minutes(seg_start, seg_end, window_start, window_end)
+            if mins <= 0:
+                continue
+            if st == "setting_change":
+                planned_seg += mins
+            elif st in ("breakdown", "alarm"):
+                unplanned_seg += mins
+        # Prefer the larger of ticket/MCR vs status-log so nothing is double-missed
+        out[mid]["planned_dt_min"] = max(out[mid]["planned_dt_min"], planned_seg)
+        out[mid]["unplanned_dt_min"] = max(out[mid]["unplanned_dt_min"], unplanned_seg)
+
+    return out
+
+
+def _compute_imm_oee_rates(
+    *,
+    scheduled_min: float,
+    planned_dt_min: float,
+    unplanned_dt_min: float,
+    units_produced: int,
+    good_units: int,
+    set_cycle_time_sec: float,
+) -> dict:
+    """IMM OEE per plant formula.
+
+    Total Planned Production Time = Scheduled (shift start→now) − Planned DT
+    Total Operating Time          = Planned Production Time − Unplanned DT
+    Availability = Operating / Planned Production
+    Performance  = (Units × Set CT) / Operating Time
+    Quality      = Good / Units
+    OEE          = A × P × Q
+    """
+    scheduled_min = max(0.0, float(scheduled_min or 0))
+    planned_dt_min = max(0.0, float(planned_dt_min or 0))
+    unplanned_dt_min = max(0.0, float(unplanned_dt_min or 0))
+    units = max(0, int(units_produced or 0))
+    good = max(0, min(int(good_units or 0), units) if units else 0)
+    ct_sec = max(0.0, float(set_cycle_time_sec or 0))
+
+    planned_prod_min = max(0.0, scheduled_min - planned_dt_min)
+    operating_min = max(0.0, planned_prod_min - unplanned_dt_min)
+
+    ar_raw = round((operating_min / planned_prod_min * 100.0), 2) if planned_prod_min > 0 else 0.0
+    operating_sec = operating_min * 60.0
+    if operating_sec > 0 and ct_sec > 0 and units > 0:
+        pr_raw = round((units * ct_sec) / operating_sec * 100.0, 2)
+    else:
+        pr_raw = 0.0
+    qr_raw = round((good / units * 100.0), 2) if units > 0 else 100.0
+
+    rates = _calculate_display_rates(ar_raw, pr_raw, qr_raw)
+    return {
+        **rates,
+        "ar_raw": ar_raw,
+        "pr_raw": pr_raw,
+        "qr_raw": qr_raw,
+        "oee_raw": round(ar_raw * pr_raw * qr_raw / 10000, 2),
+        "scheduled_min": round(scheduled_min, 2),
+        "planned_dt_min": round(planned_dt_min, 2),
+        "unplanned_dt_min": round(unplanned_dt_min, 2),
+        "planned_prod_min": round(planned_prod_min, 2),
+        "operating_min": round(operating_min, 2),
     }
 
 
@@ -290,16 +500,25 @@ def get_summary(
         ))
     entries = q.all()
     if not entries:
-        return {"avg_ar": 0, "avg_pr": 0, "avg_qr": 0, "avg_oee": 0, "total_actual": 0, "total_accp": 0, "total_defect": 0}
+        return {
+            "avg_ar": 0, "avg_pr": 0, "avg_qr": 0, "avg_oee": 0,
+            "plant_oee": 0, "total_actual": 0, "total_accp": 0, "total_defect": 0,
+            "count": 0, "machine_count": 0,
+        }
+    n = len(entries)
+    avg_oee = round(sum(float(e.oee or 0) for e in entries) / n, 2)
     return {
-        "avg_ar": round(sum(float(e.ar or 0) for e in entries) / len(entries), 2),
-        "avg_pr": round(sum(float(e.pr or 0) for e in entries) / len(entries), 2),
-        "avg_qr": round(sum(float(e.qr or 0) for e in entries) / len(entries), 2),
-        "avg_oee": round(sum(float(e.oee or 0) for e in entries) / len(entries), 2),
+        "avg_ar": round(sum(float(e.ar or 0) for e in entries) / n, 2),
+        "avg_pr": round(sum(float(e.pr or 0) for e in entries) / n, 2),
+        "avg_qr": round(sum(float(e.qr or 0) for e in entries) / n, 2),
+        "avg_oee": avg_oee,
+        # Overall plant efficiency = cumulative OEE of all machines / machine count
+        "plant_oee": avg_oee,
         "total_actual": sum(e.actual_qty or 0 for e in entries),
         "total_accp": sum(e.accp_qty or 0 for e in entries),
         "total_defect": sum(e.defect_qty or 0 for e in entries),
-        "count": len(entries)
+        "count": n,
+        "machine_count": n,
     }
 
 def _compute_realtime_oee_for_date(
@@ -403,8 +622,33 @@ def _compute_realtime_oee_for_date(
         for p in shift_plans:
             plans_by_machine.setdefault(p.machine_id, []).append(p)
 
-        now = datetime.now()
-        effective_end = min(shift_end, now)
+        now = now_ist()
+        if getattr(now, "tzinfo", None) is not None:
+            now = now.replace(tzinfo=None)
+        # Scheduled time = shift start → current (cap at shift end)
+        effective_end = min(shift_end, now) if now > shift_start else shift_start
+        scheduled_min = max(0.0, (effective_end - shift_start).total_seconds() / 60.0)
+
+        mid_list = list(plans_by_machine.keys())
+        dt_by_mid = _batch_breakdown_downtime_min(db, mid_list, shift_start, effective_end)
+
+        # Defects from saved OEE rows (QC edits) for good-units quality
+        defect_by_mid = {}
+        if mid_list:
+            oee_saved = (
+                db.query(OEEEntry)
+                .filter(
+                    OEEEntry.entry_date == target_date,
+                    OEEEntry.shift == str(sh_id),
+                    OEEEntry.machine_id.in_(mid_list),
+                )
+                .order_by(OEEEntry.id.desc())
+                .all()
+            )
+            for row in oee_saved:
+                mid = int(row.machine_id) if row.machine_id is not None else None
+                if mid is not None and mid not in defect_by_mid:
+                    defect_by_mid[mid] = max(0, int(row.defect_qty or 0))
 
         for mid, mplans in plans_by_machine.items():
             m = machine_map.get(mid)
@@ -412,20 +656,7 @@ def _compute_realtime_oee_for_date(
                 continue
             st = station_map.get(m.station_id)
 
-            segments = _build_status_segments(db, mid, shift_start, effective_end)
-
-            op_mins = 0.0
-            for seg in segments:
-                if seg["state"] in ("running", "ld_unld"):
-                    lo = max(seg["start"], shift_start)
-                    hi = min(seg["end"], effective_end)
-                    if hi > lo:
-                        op_mins += (hi - lo).total_seconds() / 60.0
-
-            running_segs = [s for s in segments if s["state"] == "running"
-                            and s["start"] >= shift_start and s["start"] < effective_end]
-
-            # Prefer running / highest-priority plan for mold cavity + CT
+            # Prefer running / highest-priority plan for mold cavity + set CT
             status_rank = {"running": 0, "paused": 1, "completed": 2, "pending": 3}
             mplans_sorted = sorted(
                 mplans,
@@ -441,30 +672,42 @@ def _compute_realtime_oee_for_date(
                     break
 
             # Shot count from OPC UA / status-tag cycle sequences
-            # OPCUA: Injection_Time → Charging_Time → Production_Count
-            # IMM17/18: Injection_Status true → Refilling_Status true
             from ..imm_shot_counter import count_machine_shots
             shot_count = count_machine_shots(db, mid, shift_start, effective_end)
             running_cavity = _running_cavity_from_plan(primary_plan, default=1)
-            # Actual parts = shots × running cavity
+            # Total units produced = shots × actual running cavity
             actual_qty = int(shot_count) * int(running_cavity)
 
             total_planned = sum(p.planned_qty or 0 for p in mplans)
-            if primary_ct > 0 and available_mins > 0:
-                possible_shots = int(available_mins * (60.0 / primary_ct))
+            # Theoretical capacity over planned production time (for Possible qty display)
+            dt = dt_by_mid.get(mid) or {"planned_dt_min": 0.0, "unplanned_dt_min": 0.0}
+            planned_dt = float(dt.get("planned_dt_min") or 0)
+            unplanned_dt = float(dt.get("unplanned_dt_min") or 0)
+
+            defect_qty = int(defect_by_mid.get(mid) or 0)
+            accp_qty = max(0, actual_qty - defect_qty)
+
+            imm = _compute_imm_oee_rates(
+                scheduled_min=scheduled_min,
+                planned_dt_min=planned_dt,
+                unplanned_dt_min=unplanned_dt,
+                units_produced=actual_qty,
+                good_units=accp_qty,
+                set_cycle_time_sec=primary_ct,
+            )
+
+            planned_prod_min = float(imm["planned_prod_min"])
+            operating_min = float(imm["operating_min"])
+            if primary_ct > 0 and operating_min > 0:
+                possible_shots = int(operating_min * (60.0 / primary_ct))
+                possible_qty = possible_shots * int(running_cavity)
+            elif primary_ct > 0 and planned_prod_min > 0:
+                possible_shots = int(planned_prod_min * (60.0 / primary_ct))
                 possible_qty = possible_shots * int(running_cavity)
             else:
                 possible_qty = total_planned
 
-            expected_qty = min(possible_qty, total_planned) if total_planned > 0 else possible_qty
-
-            ar = round(min(op_mins / available_mins * 100, 100.0), 2) if available_mins > 0 else 0.0
-            pr = round(actual_qty / expected_qty * 100, 2) if expected_qty > 0 else 0.0
-            qr = 100.0
-            oee_val = round(ar * pr * qr / 10000, 2)
-
             prod_loss = max(0, possible_qty - actual_qty)
-            accp_qty = actual_qty
 
             wo_no_list = list({wo_map.get(p.work_order_id, "") for p in mplans if p.work_order_id})
             wo_display = ", ".join(w for w in wo_no_list if w) or "—"
@@ -494,18 +737,28 @@ def _compute_realtime_oee_for_date(
                 "process_time": float(primary_ct) if primary_ct else 0,
                 "loading_unloading": 0,
                 "cycle_time": float(primary_ct) if primary_ct else 0,
-                "available_shift_time": round(available_mins),
-                "operating_time": round(op_mins),
+                # IMM time base
+                "scheduled_min": imm["scheduled_min"],
+                "planned_dt_min": imm["planned_dt_min"],
+                "unplanned_dt_min": imm["unplanned_dt_min"],
+                "planned_prod_min": imm["planned_prod_min"],
+                "available_shift_time": round(imm["planned_prod_min"]),
+                "operating_time": round(imm["operating_min"]),
                 "possible_qty": possible_qty,
                 "actual_qty": actual_qty,
                 "production_loss": prod_loss,
                 "accp_qty": accp_qty,
-                "defect_qty": 0,
-                "ar": ar,
-                "pr": pr,
-                "qr": qr,
-                "oee": oee_val,
+                "defect_qty": defect_qty,
+                "ar": imm["ar"],
+                "pr": imm["pr"],
+                "qr": imm["qr"],
+                "oee": imm["oee"],
+                "ar_raw": imm["ar_raw"],
+                "pr_raw": imm["pr_raw"],
+                "qr_raw": imm["qr_raw"],
+                "oee_raw": imm["oee_raw"],
                 "planned_qty": total_planned,
+                "formula": "imm_v1",
             })
 
     return results
@@ -564,16 +817,18 @@ def realtime_oee(
 
 
 class DefectUpdate(BaseModel):
-    defect_qty: int
+    defect_qty: Optional[int] = None
     note: Optional[str] = ""
+    rejection_reasons: Optional[Dict[str, int]] = None
 
 
 class DefectUpdateByMachine(BaseModel):
     machine_id: int
     entry_date: date
     shift: str
-    defect_qty: int
+    defect_qty: Optional[int] = None
     note: Optional[str] = ""
+    rejection_reasons: Optional[Dict[str, int]] = None
 
 
 class RunningCavityUpdate(BaseModel):
@@ -1001,14 +1256,32 @@ def _materialize_oee_from_realtime(
     return entry
 
 
-def _apply_defect_update(entry: OEEEntry, defect_qty: int, note: str, user_id: int, db: Session) -> dict:
+def _apply_defect_update(
+    entry: OEEEntry,
+    defect_qty: Optional[int],
+    note: str,
+    user_id: int,
+    db: Session,
+    rejection_reasons: Optional[Dict[str, int]] = None,
+) -> dict:
     before_defect = entry.defect_qty or 0
     before_accp = entry.accp_qty or 0
     before_qr = float(entry.qr or 0)
     before_oee = float(entry.oee or 0)
 
+    reasons = _normalize_rejection_reasons(rejection_reasons) if rejection_reasons is not None else None
+    if reasons is not None:
+        new_defect = sum(reasons.values())
+        auto_note = _rejection_note(reasons)
+        note = (note or "").strip() or auto_note
+        rejection_payload = json.dumps(reasons)
+    else:
+        if defect_qty is None:
+            raise HTTPException(400, "defect_qty or rejection_reasons is required")
+        new_defect = max(0, int(defect_qty))
+        rejection_payload = getattr(entry, "rejection_json", None)
+
     actual = entry.actual_qty or 0
-    new_defect = max(0, defect_qty)
     if new_defect > actual:
         raise HTTPException(400, "Defect qty cannot exceed actual qty")
     new_accp = max(0, actual - new_defect)
@@ -1020,7 +1293,7 @@ def _apply_defect_update(entry: OEEEntry, defect_qty: int, note: str, user_id: i
     oee_raw_new = round(ar * pr * qr_raw_new / 10000, 2)
     new_oee = rates_new["oee"]
 
-    log = OEEDefectLog(
+    log_row = OEEDefectLog(
         oee_entry_id=entry.id,
         updated_at=now_ist(),
         updated_by=user_id,
@@ -1033,8 +1306,9 @@ def _apply_defect_update(entry: OEEEntry, defect_qty: int, note: str, user_id: i
         after_qr=new_qr,
         after_oee=new_oee,
         note=note or "",
+        rejection_json=rejection_payload if reasons is not None else None,
     )
-    db.add(log)
+    db.add(log_row)
 
     entry.defect_qty = new_defect
     entry.accp_qty = new_accp
@@ -1042,6 +1316,8 @@ def _apply_defect_update(entry: OEEEntry, defect_qty: int, note: str, user_id: i
     entry.qr_raw = qr_raw_new if qr_raw_new > 100 else None
     entry.oee = new_oee
     entry.oee_raw = oee_raw_new if oee_raw_new > new_oee else None
+    if reasons is not None:
+        entry.rejection_json = rejection_payload
     db.commit()
     db.refresh(entry)
     return {
@@ -1052,6 +1328,8 @@ def _apply_defect_update(entry: OEEEntry, defect_qty: int, note: str, user_id: i
         "oee": new_oee,
         "qr_raw": qr_raw_new if qr_raw_new > 100 else None,
         "oee_raw": oee_raw_new if oee_raw_new > new_oee else None,
+        "rejection_json": getattr(entry, "rejection_json", None),
+        "rejection_reasons": reasons,
         "before": {
             "defect_qty": before_defect,
             "accp_qty": before_accp,
@@ -1082,7 +1360,54 @@ def update_defect_by_machine(
             user.id,
             cfg,
         )
-    return _apply_defect_update(entry, data.defect_qty, data.note or "", user.id, db)
+    return _apply_defect_update(
+        entry, data.defect_qty, data.note or "", user.id, db,
+        rejection_reasons=data.rejection_reasons,
+    )
+
+
+@router.get("/rejection-reasons")
+def get_rejection_reasons(_=Depends(get_current_user)):
+    return {"reasons": REJECTION_REASONS}
+
+
+@router.get("/rejection/by-machine")
+def get_rejection_by_machine(
+    machine_id: int = Query(...),
+    entry_date: date = Query(...),
+    shift: str = Query(...),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Latest rejection breakdown for machine/date/shift (for Rejection Log modal)."""
+    entry = _find_oee_entry(db, machine_id, entry_date, shift)
+    if not entry:
+        return {
+            "machine_id": machine_id,
+            "entry_date": entry_date.isoformat(),
+            "shift": shift,
+            "defect_qty": 0,
+            "actual_qty": 0,
+            "rejection_reasons": {r: 0 for r in REJECTION_REASONS},
+            "rejection_json": None,
+        }
+    parsed = None
+    if entry.rejection_json:
+        try:
+            parsed = json.loads(entry.rejection_json)
+        except Exception:
+            parsed = None
+    reasons = _normalize_rejection_reasons(parsed)
+    return {
+        "id": entry.id,
+        "machine_id": machine_id,
+        "entry_date": entry_date.isoformat(),
+        "shift": shift,
+        "defect_qty": int(entry.defect_qty or 0),
+        "actual_qty": int(entry.actual_qty or 0),
+        "rejection_reasons": reasons,
+        "rejection_json": entry.rejection_json,
+    }
 
 
 @router.patch("/running-cavity")
@@ -1167,6 +1492,7 @@ def _format_defect_log(db: Session, entry_id: int) -> list:
         "updated_at": l.updated_at.strftime('%Y-%m-%d %H:%M:%S IST'),
         "updated_by": user_map.get(l.updated_by, str(l.updated_by)),
         "before_defect_qty": l.before_defect_qty, "before_accp_qty": l.before_accp_qty,
+        "rejection_json": getattr(l, "rejection_json", None),
         "before_qr": float(l.before_qr or 0), "before_oee": float(l.before_oee or 0),
         "after_defect_qty": l.after_defect_qty, "after_accp_qty": l.after_accp_qty,
         "after_qr": float(l.after_qr or 0), "after_oee": float(l.after_oee or 0),
@@ -1195,7 +1521,10 @@ def update_defect(entry_id: int, data: DefectUpdate,
     entry = db.query(OEEEntry).filter(OEEEntry.id == entry_id).first()
     if not entry:
         raise HTTPException(404, "Entry not found")
-    return _apply_defect_update(entry, data.defect_qty, data.note or "", user.id, db)
+    return _apply_defect_update(
+        entry, data.defect_qty, data.note or "", user.id, db,
+        rejection_reasons=data.rejection_reasons,
+    )
 
 @router.get("/{entry_id}/defect-log")
 def get_defect_log(entry_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):

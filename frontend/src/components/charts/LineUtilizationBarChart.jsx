@@ -124,8 +124,8 @@ export default function LineUtilizationBarChart({
           }}>
             {yLabel}
           </span>
-          {[...yTicks].reverse().map((tick) => (
-            <span key={tick} style={{
+          {[...yTicks].reverse().map((tick, i) => (
+            <span key={`ytick-${i}-${tick}`} style={{
               fontSize: 12,
               color: dim,
               fontVariantNumeric: 'tabular-nums',

@@ -1,6 +1,9 @@
 """IMM Factory / Zone / Equipment dashboard aggregates."""
 from __future__ import annotations
 
+import copy
+import threading
+import time
 from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,13 +12,35 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
-from ..models import ImmOpcuaLatest, Machine, ProductionPlan, Station, get_db, now_ist
-from ..opcua_imm import highlights_for_machine, eap_imm_status_from_opcua_highlights
+from ..models import (
+    BreakdownTicket,
+    ImmOpcuaLatest,
+    Machine,
+    ModelChangeRequest,
+    ProductionPlan,
+    Station,
+    get_db,
+    now_ist,
+)
+from ..opcua_imm import (
+    HIGHLIGHT_KEYS,
+    eap_imm_status_from_opcua_highlights,
+    highlights_for_machine,
+    normalize_param_key,
+)
 from .config import _load_config
-from .machines import _compute_status, _resolve_shift_at_ts
-from .imm_monitor import _check_kpiv_alerts, _map_imm_status, _map_kpiv_status
+from .machines import _resolve_shift_at_ts
+from .imm_monitor import _map_imm_status, _map_kpiv_status
 
 router = APIRouter(prefix="/api/imm/dashboard", tags=["imm-dashboard"])
+
+# Short TTL cache — Factory/Zone/Equipment UIs poll often; avoid rebuilding every hit.
+_FACTORY_CACHE_TTL_SEC = 3.0
+_factory_cache_lock = threading.Lock()
+_factory_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
+_plan_sync_lock = threading.Lock()
+_plan_sync_last = 0.0
+_PLAN_SYNC_MIN_INTERVAL_SEC = 60.0
 
 ZONE_COLORS = [
     "#38bdf8",  # sky
@@ -105,13 +130,28 @@ def _opcua_num(opcua: dict, key: str, default: float = 0.0) -> float:
         return default
 
 
-def _machine_tile_metrics(_db: Session, _machine_id: int, opcua: dict, imm_key: str) -> dict:
-    """Compact KPIs for zone/station machine cards."""
-    prod = _opcua_num(opcua, "Actual_Production_Count")
-    good = _opcua_num(opcua, "Total_Good_Count")
-    bad = _opcua_num(opcua, "Total_Bad_Count")
-    if prod <= 0 and (good > 0 or bad > 0):
-        prod = good + bad
+def _machine_tile_metrics(
+    _db: Session,
+    _machine_id: int,
+    opcua: dict,
+    imm_key: str,
+    *,
+    shift_prod: Optional[dict] = None,
+) -> dict:
+    """Compact KPIs for zone/station machine cards — current shift only.
+
+    Resets each shift. Mold changes within the shift stay cumulative
+    (shots across the whole window / summed plan actuals).
+    """
+    if shift_prod:
+        prod = float(shift_prod.get("shift_act_prod") or 0)
+        good = float(shift_prod.get("shift_good") or 0)
+        bad = float(shift_prod.get("shift_bad") or 0)
+        downtime = shift_prod.get("downtime_min")
+    else:
+        # Fallback: still avoid lifetime OPC UA counters on tiles
+        prod = good = bad = 0.0
+        downtime = None
 
     # Quality rate; treat running machines with no scrap as 100% QR
     if good + bad > 0:
@@ -128,34 +168,142 @@ def _machine_tile_metrics(_db: Session, _machine_id: int, opcua: dict, imm_key: 
         ar = 50.0
     else:
         ar = 0.0
-    pr = 100.0 if prod > 0 or imm_key == "production" else 0.0
+    target = float((shift_prod or {}).get("shift_prod_target") or 0)
+    if target > 0 and prod >= 0:
+        pr = round(min(100.0, 100.0 * prod / target), 1)
+    else:
+        pr = 100.0 if prod > 0 or imm_key == "production" else 0.0
     oee = round(ar * pr * qr / 10000.0, 1)
 
     return {
         "total_production": prod,
         "total_good": good,
         "total_bad": bad,
-        "downtime_min": None,
+        "downtime_min": downtime,
         "last_hr_bad": None,
         "oee": oee,
         "qr": qr,
+        "shift_id": (shift_prod or {}).get("shift_id"),
+        "shift_name": (shift_prod or {}).get("shift_name"),
+        "entry_date": (shift_prod or {}).get("entry_date"),
+        "shot_count": (shift_prod or {}).get("shot_count"),
+        "running_cavity": (shift_prod or {}).get("running_cavity"),
+        "shift_prod_target": (shift_prod or {}).get("shift_prod_target"),
     }
 
 
-def _machine_payload(m: Machine, db: Session, stations: Dict[int, Station]) -> dict:
-    errs = _check_kpiv_alerts(db, m.id)
+def _rows_to_highlights(rows_by_key: Dict[str, ImmOpcuaLatest]) -> dict:
+    """Build highlight dict from preloaded ImmOpcuaLatest rows for one machine."""
+    by_norm: Dict[str, ImmOpcuaLatest] = {}
+    for pk, r in rows_by_key.items():
+        nk = normalize_param_key(pk)
+        prev = by_norm.get(nk)
+        if prev is None or (r.recorded_at and (not prev.recorded_at or r.recorded_at >= prev.recorded_at)):
+            by_norm[nk] = r
+    out = {}
+    for key in HIGHLIGHT_KEYS:
+        r = rows_by_key.get(key) or by_norm.get(key)
+        if not r:
+            continue
+        out[key] = {
+            "value_num": r.value_num,
+            "value_text": r.value_text,
+            "recorded_at": r.recorded_at.isoformat() if r.recorded_at else None,
+        }
+    return out
+
+
+def _batch_opcua_highlights(db: Session, machine_ids: List[int]) -> Dict[int, dict]:
+    if not machine_ids:
+        return {}
+    rows = (
+        db.query(ImmOpcuaLatest)
+        .filter(ImmOpcuaLatest.machine_id.in_(machine_ids))
+        .all()
+    )
+    by_machine: Dict[int, Dict[str, ImmOpcuaLatest]] = {}
+    for r in rows:
+        by_machine.setdefault(r.machine_id, {})[r.param_key] = r
+    return {mid: _rows_to_highlights(by_machine.get(mid, {})) for mid in machine_ids}
+
+
+def _batch_ticket_overrides(db: Session, machine_ids: List[int]) -> Dict[int, str]:
+    """Map machine_id → breakdown|setting_change when an open ticket exists."""
+    if not machine_ids:
+        return {}
+    out: Dict[int, str] = {}
+    for mid, dtype in (
+        db.query(BreakdownTicket.machine_id, BreakdownTicket.downtime_type)
+        .filter(
+            BreakdownTicket.machine_id.in_(machine_ids),
+            BreakdownTicket.status.in_(["raised", "acknowledged", "in_progress"]),
+        )
+        .all()
+    ):
+        mid = int(mid)
+        # Unplanned (or legacy) tickets win over planned when both exist
+        if dtype == "planned" and mid in out:
+            continue
+        out[mid] = "setting_change" if dtype == "planned" else "breakdown"
+    for mid, in (
+        db.query(ModelChangeRequest.machine_id)
+        .filter(
+            ModelChangeRequest.machine_id.in_(machine_ids),
+            ModelChangeRequest.status.in_(["approved", "in_progress"]),
+        )
+        .distinct()
+        .all()
+    ):
+        mid = int(mid)
+        if mid not in out:
+            out[mid] = "setting_change"
+    return out
+
+
+def _machine_payload(
+    m: Machine,
+    db: Session,
+    stations: Dict[int, Station],
+    *,
+    opcua: Optional[dict] = None,
+    ticket_override: Optional[str] = None,
+    include_kpiv_alerts: bool = False,
+    shift_prod: Optional[dict] = None,
+) -> dict:
+    # KPIV alert scans are expensive (many queries/machine) — skip on factory/zone polls.
+    errs: List[str] = []
+    if include_kpiv_alerts:
+        try:
+            from .imm_monitor import _check_kpiv_alerts
+            errs = _check_kpiv_alerts(db, m.id)
+        except Exception:
+            errs = []
     st = stations.get(m.station_id)
-    try:
-        opcua = highlights_for_machine(db, m.id)
-    except Exception:
-        opcua = {}
-    live = eap_imm_status_from_opcua_highlights(opcua)
-    ticket_live = _compute_status(m, db)
-    if ticket_live in ("breakdown", "alarm", "setting_change"):
-        live = ticket_live
+    if opcua is None:
+        try:
+            opcua = highlights_for_machine(db, m.id)
+        except Exception:
+            opcua = {}
+    live = eap_imm_status_from_opcua_highlights(
+        opcua,
+        machine_name=m.name,
+        plc_source=getattr(m, "plc_source", None),
+        db=db,
+    )
+    if ticket_override in ("breakdown", "alarm", "setting_change"):
+        live = ticket_override
+    elif (m.status or "").lower() == "alarm":
+        live = "alarm"
+    elif (m.status or "").lower() == "offline" and live == "offline":
+        live = "offline"
     imm = _map_imm_status(live, errs)
     kpiv_st = _map_kpiv_status(errs, live)
-    tile = _machine_tile_metrics(db, m.id, opcua, imm["key"])
+    if shift_prod is None:
+        try:
+            shift_prod = _equipment_shift_production(db, m.id)
+        except Exception:
+            shift_prod = None
+    tile = _machine_tile_metrics(db, m.id, opcua, imm["key"], shift_prod=shift_prod)
     return {
         "id": m.id,
         "name": m.name,
@@ -300,18 +448,24 @@ def _build_plan_achievement(db: Session, zone_rows: List[dict]) -> Tuple[dict, d
             {"id": "B", "name": "Shift B", "start": "20:00", "end": "08:00", "enabled": True},
         ]
 
-    # Keep plan.actual_qty in sync with status-log running parts
-    try:
-        from .hourly_output import sync_plan_actuals_from_status_logs
+    # Throttle heavy status-log → plan.actual sync (was running on every dashboard poll)
+    global _plan_sync_last
+    now_mono = time.monotonic()
+    if now_mono - _plan_sync_last >= _PLAN_SYNC_MIN_INTERVAL_SEC:
+        with _plan_sync_lock:
+            if now_mono - _plan_sync_last >= _PLAN_SYNC_MIN_INTERVAL_SEC:
+                try:
+                    from .hourly_output import sync_plan_actuals_from_status_logs
 
-        sync_plan_actuals_from_status_logs(
-            db,
-            date_from=entry_date - timedelta(days=1),
-            date_to=now.date(),
-            commit=True,
-        )
-    except Exception as exc:
-        print(f"[IMM Dashboard] plan actual sync skipped: {exc}")
+                    sync_plan_actuals_from_status_logs(
+                        db,
+                        date_from=entry_date - timedelta(days=1),
+                        date_to=now.date(),
+                        commit=True,
+                    )
+                    _plan_sync_last = time.monotonic()
+                except Exception as exc:
+                    print(f"[IMM Dashboard] plan actual sync skipped: {exc}")
 
     active_meta = next((s for s in enabled if str(s.get("id")) == str(shift_id)), None)
     if not active_meta:
@@ -598,19 +752,39 @@ def _build_zones_from_config(factories: List[dict], stations: Dict[int, Station]
     return zones
 
 
-def _factory_dashboard_data(db: Session) -> dict:
+def _factory_dashboard_data(db: Session, *, use_cache: bool = True) -> dict:
     from ..energy_meter import iter_production_machines
 
+    if use_cache:
+        with _factory_cache_lock:
+            age = time.monotonic() - float(_factory_cache.get("ts") or 0)
+            if _factory_cache.get("data") is not None and age < _FACTORY_CACHE_TTL_SEC:
+                return copy.deepcopy(_factory_cache["data"])
+
     stations = {s.id: s for s in db.query(Station).all()}
-    machines = iter_production_machines(db, order=True)
-    items = [_machine_payload(m, db, stations) for m in machines]
+    machines = list(iter_production_machines(db, order=True))
+    mids = [m.id for m in machines]
+    opcua_by_mid = _batch_opcua_highlights(db, mids)
+    ticket_by_mid = _batch_ticket_overrides(db, mids)
+    shift_by_mid = _batch_shift_production(db, mids)
+    items = [
+        _machine_payload(
+            m,
+            db,
+            stations,
+            opcua=opcua_by_mid.get(m.id) or {},
+            ticket_override=ticket_by_mid.get(m.id),
+            include_kpiv_alerts=False,
+            shift_prod=shift_by_mid.get(m.id),
+        )
+        for m in machines
+    ]
     counts = _status_counts(items)
     running_pct = _running_pct(items)
 
     factories = _load_factory_tree(db)
     zones_meta = _build_zones_from_config(factories, stations, machines)
 
-    mids = [m.id for m in machines]
     good = _opcua_sum(db, mids, "Total_Good_Count")
     bad = _opcua_sum(db, mids, "Total_Bad_Count")
     prod = _opcua_sum(db, mids, "Actual_Production_Count")
@@ -717,7 +891,7 @@ def _factory_dashboard_data(db: Session) -> dict:
     active_shift = _match_shift_at(cfg, now_ist())
     utilization = _live_utilization(zone_rows, shift_name=(active_shift or {}).get("name") or "Shift A")
 
-    return {
+    result = {
         "site_label": site_label,
         "factory_name": factory_name,
         "factories": factory_list,
@@ -746,23 +920,16 @@ def _factory_dashboard_data(db: Session) -> dict:
         "machines": items,
         "demo": False,
     }
+    if use_cache:
+        with _factory_cache_lock:
+            _factory_cache["ts"] = time.monotonic()
+            _factory_cache["data"] = copy.deepcopy(result)
+    return result
 
 
-
-@router.get("/factory")
-def factory_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    return _factory_dashboard_data(db)
-
-
-@router.get("/factory/running-rate-trend")
-def factory_running_rate_trend(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    data = _factory_dashboard_data(db)
-    return _factory_running_rate_trend(db, data.get("zones") or [])
-
-
-@router.get("/zones")
-def list_zones(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    data = _factory_dashboard_data(db)
+def _zones_list_payload(db: Session) -> dict:
+    """Lightweight zone picker — uses cached factory data when warm."""
+    data = _factory_dashboard_data(db, use_cache=True)
     return {
         "site_label": data["site_label"],
         "factory_name": data.get("factory_name") or data["site_label"],
@@ -782,6 +949,23 @@ def list_zones(db: Session = Depends(get_db), _=Depends(get_current_user)):
             for z in data["zones"]
         ],
     }
+
+
+
+@router.get("/factory")
+def factory_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    return _factory_dashboard_data(db)
+
+
+@router.get("/factory/running-rate-trend")
+def factory_running_rate_trend(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    data = _factory_dashboard_data(db)
+    return _factory_running_rate_trend(db, data.get("zones") or [])
+
+
+@router.get("/zones")
+def list_zones(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    return _zones_list_payload(db)
 
 
 @router.get("/zone/{zone_id}")
@@ -833,9 +1017,156 @@ def zone_dashboard(zone_id: str, db: Session = Depends(get_db), _=Depends(get_cu
     }
 
 
+def _current_shift_window(db: Session) -> Tuple[str, Any, dict, datetime, datetime, datetime]:
+    """Return (shift_id, entry_date, shift_def, shift_start, shift_end, effective_end)."""
+    from .hourly_output import _effective_shift_end, _shift_window
+
+    cfg = _load_config(db)
+    now = now_ist()
+    if getattr(now, "tzinfo", None) is not None:
+        now = now.replace(tzinfo=None)
+
+    shift_id, entry_date = _resolve_shift_at_ts(now, cfg)
+    sh = next(
+        (s for s in (cfg.get("shifts") or []) if str(s.get("id")) == str(shift_id)),
+        None,
+    )
+    if not sh:
+        enabled = [s for s in (cfg.get("shifts") or []) if s.get("enabled", True)]
+        sh = enabled[0] if enabled else {"id": shift_id, "start": "08:00", "end": "20:00", "name": f"Shift {shift_id}"}
+        shift_id = sh.get("id", shift_id)
+
+    shift_start, shift_end = _shift_window(entry_date, sh)
+    effective_end = _effective_shift_end(shift_start, shift_end)
+    return str(shift_id), entry_date, sh, shift_start, shift_end, effective_end
+
+
+def _batch_shift_production(db: Session, machine_ids: List[int]) -> Dict[int, dict]:
+    """Shift-scoped production for many machines (zone/factory tiles).
+
+    - Resets at shift boundary (shots counted only in current shift window).
+    - Mold / plan changes within the shift accumulate (sum of plan actuals, or
+      live shots × cavity when a single active plan).
+    """
+    from ..imm_shot_counter import batch_count_shot_events, count_machine_shots
+    from ..models import OEEEntry
+    from .oee import _running_cavity_from_plan
+
+    mids = [int(x) for x in (machine_ids or []) if x is not None]
+    if not mids:
+        return {}
+
+    shift_id, entry_date, sh, shift_start, shift_end, effective_end = _current_shift_window(db)
+    shift_name = sh.get("name") or f"Shift {shift_id}"
+
+    plans = (
+        db.query(ProductionPlan)
+        .filter(
+            ProductionPlan.machine_id.in_(mids),
+            ProductionPlan.plan_date == entry_date,
+            ProductionPlan.shift == str(shift_id),
+            ProductionPlan.status.in_(("pending", "running", "paused", "completed")),
+        )
+        .order_by(ProductionPlan.priority, ProductionPlan.id)
+        .all()
+    )
+    plans_by_mid: Dict[int, List[ProductionPlan]] = {}
+    for p in plans:
+        plans_by_mid.setdefault(int(p.machine_id), []).append(p)
+
+    oee_rows = (
+        db.query(OEEEntry)
+        .filter(
+            OEEEntry.machine_id.in_(mids),
+            OEEEntry.entry_date == entry_date,
+            OEEEntry.shift == str(shift_id),
+        )
+        .order_by(OEEEntry.id.desc())
+        .all()
+    )
+    oee_by_mid: Dict[int, OEEEntry] = {}
+    for row in oee_rows:
+        mid = int(row.machine_id)
+        if mid not in oee_by_mid:
+            oee_by_mid[mid] = row
+
+    event_shots = batch_count_shot_events(db, mids, shift_start, effective_end)
+    status_rank = {"running": 0, "paused": 1, "completed": 2, "pending": 3}
+    out: Dict[int, dict] = {}
+
+    for mid in mids:
+        mplans = plans_by_mid.get(mid) or []
+        mplans_sorted = sorted(
+            mplans,
+            key=lambda p: (status_rank.get(p.status, 9), p.priority or 9999, p.id),
+        )
+        primary = mplans_sorted[0] if mplans_sorted else None
+        running_cavity = _running_cavity_from_plan(primary, default=1) if primary else 1
+        shift_target = sum(int(p.planned_qty or 0) for p in mplans)
+
+        # Prefer event batch; fall back to full count (events+sample replay) per machine
+        shot_count = int(event_shots.get(mid) or 0)
+        if shot_count <= 0:
+            try:
+                shot_count = int(count_machine_shots(db, mid, shift_start, effective_end) or 0)
+            except Exception:
+                shot_count = 0
+
+        live_act = int(shot_count) * int(running_cavity or 1)
+        # Cumulative across mold/plan changes in this shift
+        plan_actual_sum = sum(int(p.actual_qty or 0) for p in mplans)
+        if len(mplans) > 1 and plan_actual_sum > 0:
+            shift_act = max(live_act, plan_actual_sum)
+        else:
+            shift_act = max(live_act, plan_actual_sum)
+
+        oee_row = oee_by_mid.get(mid)
+        if oee_row is not None:
+            shift_bad = max(0, int(oee_row.defect_qty or 0))
+            shift_good = max(0, shift_act - shift_bad)
+        else:
+            shift_bad = 0
+            shift_good = shift_act
+
+        out[mid] = {
+            "shift_id": str(shift_id),
+            "shift_name": shift_name,
+            "entry_date": entry_date.isoformat(),
+            "shift_start": shift_start.isoformat(),
+            "shift_end": shift_end.isoformat(),
+            "shot_count": int(shot_count),
+            "running_cavity": int(running_cavity or 1),
+            "shift_prod_target": int(shift_target),
+            "shift_act_prod": int(shift_act),
+            "shift_good": int(shift_good),
+            "shift_bad": int(shift_bad),
+            "has_plan": bool(mplans),
+            "downtime_min": None,
+        }
+    return out
+
+
+def _equipment_shift_production(db: Session, machine_id: int) -> dict:
+    """Current-shift production for one machine (Equipment Overview + tiles)."""
+    batch = _batch_shift_production(db, [machine_id])
+    return batch.get(int(machine_id)) or {
+        "shift_id": None,
+        "shift_name": None,
+        "entry_date": None,
+        "shot_count": 0,
+        "running_cavity": 1,
+        "shift_prod_target": 0,
+        "shift_act_prod": 0,
+        "shift_good": 0,
+        "shift_bad": 0,
+        "has_plan": False,
+        "downtime_min": None,
+    }
+
+
 @router.get("/equipment/{machine_id}")
 def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
-    from ..energy_meter import is_energy_utility_machine
+    from ..energy_meter import is_energy_utility_machine, iter_production_machines
 
     stations = {s.id: s for s in db.query(Station).all()}
     m = db.query(Machine).filter(Machine.id == machine_id).first()
@@ -846,7 +1177,7 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
             404,
             "EM_PLANT / energy meters are utilities — use the Energy Meter dashboard, not equipment overview",
         )
-    payload = _machine_payload(m, db, stations)
+    payload = _machine_payload(m, db, stations, include_kpiv_alerts=True)
     opcua = payload.get("opcua") or {}
 
     def num(key: str, default: float = 0.0) -> float:
@@ -859,16 +1190,25 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
         v = opcua.get(key) or {}
         return str(v.get("value_text") or v.get("value_num") or default)
 
-    prod_qty = num("Actual_Production_Count") or num("Total_Good_Count")
+    shift_prod = _equipment_shift_production(db, machine_id)
+    # Production Qty / Act Prod = OEE formula (shot × running cavity), shift-scoped
+    prod_qty = int(shift_prod.get("shift_act_prod") or 0)
     cycle = num("Actual_Cycle_Time") or num("Last_Cycle_Time") or 0.0
-    cavity = num("Actual_Cavity_No") or 0.0
+    cavity = float(shift_prod.get("running_cavity") or 0) or num("Actual_Cavity_No") or 0.0
     uph = round(3600.0 / cycle, 1) if cycle > 0 else 0.0
+
+    lifetime_target = num("Production_Target_Count")
+    # Controllers often publish unset targets as ~1e8 — hide those as —
+    if lifetime_target >= 1_000_000:
+        lifetime_target_disp = None
+    else:
+        lifetime_target_disp = int(lifetime_target) if lifetime_target else None
+    lifetime_good = int(num("Total_Good_Count") or 0)
+    lifetime_bad = int(num("Total_Bad_Count") or 0)
 
     operate = payload.get("operate_mode") or _operate_mode(opcua) or "—"
     part_name = text("Actual_Material_Name")
     mold_name = text("Actual_Mold_Name")
-
-    from ..energy_meter import is_energy_utility_machine, iter_production_machines
 
     # Production machines only for equipment picker (exclude EM_PLANT / energy utilities)
     all_machines = iter_production_machines(db, order=True)
@@ -880,7 +1220,8 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
         if not is_energy_utility_machine(x)
     ]
 
-    factory_data = _factory_dashboard_data(db)
+    # Use cached factory snapshot for zone breadcrumb only (avoid full rebuild)
+    factory_data = _factory_dashboard_data(db, use_cache=True)
     zone = next(
         (z for z in factory_data["zones"] if m.station_id in {s.get("id") for s in (z.get("stations") or [])}),
         None,
@@ -907,13 +1248,31 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
             "tool_number": mold_name,
         },
         "production": {
-            "quantity": int(prod_qty),
+            "quantity": prod_qty,
             "uph": uph,
             "total_run_hours": None,
             "actual_ct": cycle,
             "standard_ct": cycle,
             "actual_cav": cavity,
             "standard_cav": cavity,
+            "shot_count": shift_prod.get("shot_count"),
+            "running_cavity": shift_prod.get("running_cavity"),
+        },
+        "prod_counts": {
+            "prod_target": lifetime_target_disp,
+            "act_prod": prod_qty,
+            "good": lifetime_good,
+            "bad": lifetime_bad,
+            "shift_prod_target": shift_prod.get("shift_prod_target"),
+            "shift_act_prod": shift_prod.get("shift_act_prod"),
+            "shift_good": shift_prod.get("shift_good"),
+            "shift_bad": shift_prod.get("shift_bad"),
+            "shift_id": shift_prod.get("shift_id"),
+            "shift_name": shift_prod.get("shift_name"),
+            "entry_date": shift_prod.get("entry_date"),
+            "shot_count": shift_prod.get("shot_count"),
+            "running_cavity": shift_prod.get("running_cavity"),
+            "has_plan": shift_prod.get("has_plan"),
         },
         "siblings": [{"id": x.id, "name": x.name} for x in siblings],
         "equipment_list": [{"id": x.id, "name": x.name} for x in all_machines],

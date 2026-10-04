@@ -1,40 +1,111 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from typing import Optional
-from ..models import BreakdownTicket, Machine, ProductionPlan, MachineStatusLog, get_db, now_ist
+from pydantic import BaseModel, model_validator
+from typing import Optional, Literal
+from ..models import BreakdownTicket, Machine, ProductionPlan, get_db, now_ist
 from ..auth import get_current_user, require_role
 from ..ws_manager import manager
-from datetime import datetime
 
 from .machines import _log_status
 
 router = APIRouter(prefix="/api/breakdown", tags=["breakdown"])
 
+PLANNED_REASONS = {
+    "Machine Preventive", "Meeting", "RM Change", "Plant Shutdown", "No Plan",
+    "Mould Change", "Colour Change", "Insert Change", "Mould Trial", "Power Fail",
+}
+UNPLANNED_REASONS = {
+    "Machine Maintenance", "No RM", "Chiller Maintenance", "Compressor Maintenance",
+    "Mould Maintenance", "QC Issue", "No Manpower", "Hopper Issue", "Crane Issue",
+    "No BOP", "Machine Breakdown", "Mould Polish", "Mould Breakdown", "RM Predrying",
+    "Hrs Problem", "Barrel Heating Problem", "No Packing Material", "Water Leakage",
+    "Oil Leakage",
+}
+
+
 class TicketCreate(BaseModel):
     machine_id: int
-    raised_by: int
-    description: str
+    raised_by: Optional[int] = None
+    raised_by_name: Optional[str] = None
+    description: Optional[str] = None
+    downtime_type: Optional[Literal["planned", "unplanned"]] = None
+    downtime_reason: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_raised_by(self):
+        name = (self.raised_by_name or "").strip()
+        if not self.raised_by and not name:
+            raise ValueError("Provide raised_by (user id) or raised_by_name")
+        if self.downtime_type and self.downtime_reason:
+            allowed = PLANNED_REASONS if self.downtime_type == "planned" else UNPLANNED_REASONS
+            if self.downtime_reason not in allowed:
+                raise ValueError(f"Invalid {self.downtime_type} downtime reason")
+        return self
+
 
 class TicketResolve(BaseModel):
     resolution_notes: str
 
+
+def _machine_status_for_downtime(downtime_type: Optional[str]) -> str:
+    if downtime_type == "planned":
+        return "setting_change"
+    return "breakdown"
+
+
+@router.get("/reasons")
+def get_downtime_reasons(_=Depends(get_current_user)):
+    return {
+        "planned": sorted(PLANNED_REASONS),
+        "unplanned": sorted(UNPLANNED_REASONS),
+    }
+
+
 @router.post("/")
 async def raise_ticket(data: TicketCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    raised_by_id = data.raised_by or getattr(user, "id", None)
+    if not raised_by_id:
+        raise HTTPException(400, "raised_by is required")
+
+    raised_name = (data.raised_by_name or "").strip() or None
+    reason = (data.downtime_reason or "").strip() or None
+    dtype = data.downtime_type
+    desc = (data.description or "").strip()
+    if reason and not desc:
+        label = "Planned" if dtype == "planned" else "Unplanned" if dtype == "unplanned" else "Downtime"
+        desc = f"{label}: {reason}"
+    if not desc:
+        raise HTTPException(400, "description or downtime_reason is required")
+
     ticket = BreakdownTicket(
-        machine_id=data.machine_id, raised_by=data.raised_by,
-        description=data.description, created_at=now_ist()
+        machine_id=data.machine_id,
+        raised_by=raised_by_id,
+        raised_by_name=raised_name,
+        description=desc,
+        downtime_type=dtype,
+        downtime_reason=reason,
+        created_at=now_ist(),
     )
     db.add(ticket)
     machine = db.query(Machine).filter(Machine.id == data.machine_id).first()
-    if machine: machine.status = "breakdown"
+    live_status = _machine_status_for_downtime(dtype)
+    if machine:
+        machine.status = live_status
     db.commit()
     db.refresh(ticket)
-    _log_status(data.machine_id, "breakdown", "breakdown", db)
+    _log_status(data.machine_id, live_status, "breakdown", db, deviation_reason=reason)
     db.commit()
-    await manager.broadcast({"type": "breakdown_raised", "id": ticket.id, "machine_id": data.machine_id,
-                              "description": data.description, "status": "raised"})
+    await manager.broadcast({
+        "type": "breakdown_raised",
+        "id": ticket.id,
+        "machine_id": data.machine_id,
+        "description": desc,
+        "status": "raised",
+        "downtime_type": dtype,
+        "downtime_reason": reason,
+    })
     return ticket
+
 
 @router.patch("/{ticket_id}/acknowledge")
 async def acknowledge_ticket(ticket_id: int, db: Session = Depends(get_db), user=Depends(require_role("maintenance", "admin", "supervisor"))):
@@ -52,6 +123,7 @@ async def acknowledge_ticket(ticket_id: int, db: Session = Depends(get_db), user
     await manager.broadcast({"type": "breakdown_acknowledged", "id": ticket_id, "machine_id": ticket.machine_id})
     return ticket
 
+
 @router.patch("/{ticket_id}/start")
 async def start_troubleshoot(ticket_id: int, db: Session = Depends(get_db), user=Depends(require_role("maintenance", "admin", "supervisor"))):
     ticket = db.query(BreakdownTicket).filter(BreakdownTicket.id == ticket_id).first()
@@ -61,6 +133,7 @@ async def start_troubleshoot(ticket_id: int, db: Session = Depends(get_db), user
     db.commit()
     await manager.broadcast({"type": "breakdown_in_progress", "id": ticket_id, "machine_id": ticket.machine_id})
     return ticket
+
 
 @router.patch("/{ticket_id}/resolve")
 async def resolve_ticket(ticket_id: int, data: TicketResolve, db: Session = Depends(get_db), user=Depends(require_role("maintenance", "admin", "supervisor"))):
@@ -79,6 +152,7 @@ async def resolve_ticket(ticket_id: int, data: TicketResolve, db: Session = Depe
                               "machine_id": ticket.machine_id, "status": machine.status if machine else "idle"})
     return ticket
 
+
 @router.get("/users")
 def get_users(db: Session = Depends(get_db), _=Depends(get_current_user)):
     from ..models import User
@@ -86,6 +160,7 @@ def get_users(db: Session = Depends(get_db), _=Depends(get_current_user)):
             for u in db.query(User)
                        .filter(User.role.in_(["operator", "supervisor"]))
                        .order_by(User.role, User.username).all()]
+
 
 @router.get("/")
 def get_tickets(db: Session = Depends(get_db), _=Depends(get_current_user)):
@@ -95,10 +170,16 @@ def get_tickets(db: Session = Depends(get_db), _=Depends(get_current_user)):
     result = []
     for tk in tickets:
         d = {c.name: getattr(tk, c.name) for c in tk.__table__.columns}
-        d["raised_by_username"] = users.get(tk.raised_by, str(tk.raised_by) if tk.raised_by else "")
+        username = users.get(tk.raised_by, str(tk.raised_by) if tk.raised_by else "")
+        d["raised_by_username"] = username
+        # Prefer free-text name when provided; keep field for MaintenanceDashboard
+        if not d.get("raised_by_name"):
+            d["raised_by_name"] = username
         d["acknowledged_by_username"] = users.get(tk.acknowledged_by, str(tk.acknowledged_by) if tk.acknowledged_by else "")
+        d["acknowledged_by_name"] = d["acknowledged_by_username"]
         result.append(d)
     return result
+
 
 @router.get("/machines")
 def get_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):

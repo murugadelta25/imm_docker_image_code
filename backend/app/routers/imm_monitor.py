@@ -335,8 +335,13 @@ def imm_overview(db: Session = Depends(get_db), _=Depends(get_current_user)):
             opcua_hl = highlights_for_machine(db, m.id)
         except Exception:
             opcua_hl = {}
-        # EAP IMM status from Motor/Heater (or Offline when SIE not connected)
-        live = eap_imm_status_from_opcua_highlights(opcua_hl)
+        # EAP IMM status: OPC UA (IMM_07–11) vs PLC status tags (IMM17/18)
+        live = eap_imm_status_from_opcua_highlights(
+            opcua_hl,
+            machine_name=m.name,
+            plc_source=getattr(m, "plc_source", None),
+            db=db,
+        )
         # Preserve active breakdown / alarm tickets over Motor/Heater idle/stop
         ticket_live = _compute_status(m, db)
         if ticket_live in ("breakdown", "alarm", "setting_change"):
@@ -433,7 +438,12 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
         opcua_hl = {}
         opcua_params = []
 
-    live = eap_imm_status_from_opcua_highlights(opcua_hl)
+    live = eap_imm_status_from_opcua_highlights(
+        opcua_hl,
+        machine_name=m.name,
+        plc_source=getattr(m, "plc_source", None),
+        db=db,
+    )
     ticket_live = _compute_status(m, db)
     if ticket_live in ("breakdown", "alarm", "setting_change"):
         live = ticket_live
@@ -763,11 +773,22 @@ def create_mold(
         db.query(ImmMold).filter(ImmMold.machine_id == machine_id, ImmMold.is_active == 1).update(
             {"is_active": 0}
         )
+    # Seed Uses / Max from Mold Management master when caller left defaults
+    usage_count = int(data.usage_count or 0)
+    usage_max = int(data.usage_max or 1000000)
+    from ..tool_service import find_tool_by_mold_no
+
+    master = find_tool_by_mold_no(db, data.mold_no)
+    if master:
+        if usage_count == 0 and master.cycles_used is not None:
+            usage_count = int(float(master.cycles_used or 0))
+        if usage_max == 1000000 and master.life_cycles_limit:
+            usage_max = int(master.life_cycles_limit)
     mold = ImmMold(
         machine_id=machine_id,
         mold_no=data.mold_no.strip(),
-        usage_count=data.usage_count,
-        usage_max=data.usage_max,
+        usage_count=usage_count,
+        usage_max=usage_max,
         cycles_after_maintenance=data.cycles_after_maintenance,
         maintenance_limit=data.maintenance_limit,
         notes=data.notes,
@@ -776,7 +797,7 @@ def create_mold(
     db.add(mold)
     db.commit()
     db.refresh(mold)
-    return _serialize_mold(mold)
+    return _serialize_mold(mold, _mold_master_map(db))
 
 
 @router.put("/molds/{mold_id}")
@@ -789,12 +810,42 @@ def update_mold(
     mold = db.query(ImmMold).filter(ImmMold.id == mold_id).first()
     if not mold:
         raise HTTPException(404, "Mold not found")
-    for k, v in data.dict(exclude_unset=True).items():
+    prev_usage = int(mold.usage_count or 0)
+    patch = data.dict(exclude_unset=True)
+    for k, v in patch.items():
         setattr(mold, k, v)
     mold.updated_at = now_ist()
+
+    # Keep Mold Management life in sync when Uses is manually edited
+    if "usage_count" in patch:
+        from ..tool_service import (
+            find_tool_by_mold_no,
+            log_event,
+            refresh_tool_status,
+            evaluate_stock_and_life_alerts,
+        )
+
+        tool = find_tool_by_mold_no(db, mold.mold_no)
+        if tool:
+            new_usage = int(mold.usage_count or 0)
+            before = float(tool.cycles_used or 0)
+            tool.cycles_used = float(new_usage)
+            tool.updated_at = now_ist()
+            refresh_tool_status(tool)
+            log_event(
+                db,
+                tool,
+                "adjust",
+                cycles_before=before,
+                cycles_after=float(new_usage),
+                machine_id=mold.machine_id,
+                notes=f"Mold Monitoring Uses edited ({prev_usage} → {new_usage})",
+            )
+            evaluate_stock_and_life_alerts(db, tool)
+
     db.commit()
     db.refresh(mold)
-    return _serialize_mold(mold)
+    return _serialize_mold(mold, _mold_master_map(db))
 
 
 @router.post("/molds/{mold_id}/activate")
@@ -810,10 +861,21 @@ def activate_mold(
         {"is_active": 0}
     )
     mold.is_active = 1
+    # Align Uses/Max with Mold Management master (keep the higher life used)
+    from ..tool_service import find_tool_by_mold_no
+
+    tool = find_tool_by_mold_no(db, mold.mold_no)
+    if tool:
+        used = max(int(mold.usage_count or 0), int(float(tool.cycles_used or 0)))
+        mold.usage_count = used
+        tool.cycles_used = float(used)
+        if tool.life_cycles_limit and (not mold.usage_max or int(mold.usage_max) == 1000000):
+            mold.usage_max = int(tool.life_cycles_limit)
+        tool.updated_at = now_ist()
     mold.updated_at = now_ist()
     db.commit()
     db.refresh(mold)
-    return _serialize_mold(mold)
+    return _serialize_mold(mold, _mold_master_map(db))
 
 
 @router.post("/molds/{mold_id}/reset-maintenance")

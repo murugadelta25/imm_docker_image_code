@@ -122,7 +122,9 @@ export default function ImmKpiDashboard() {
         if (!filters.zone_id && ep.data?.zone?.id) {
           setFilters((p) => ({ ...p, zone_id: String(ep.data.zone.id) }));
         }
-        if (!filters.machine_id && ep.data?.machine_id != null) {
+        const equipIds = new Set((ep.data?.equipment || []).map((eq) => String(eq.id)));
+        const midOk = filters.machine_id && equipIds.has(String(filters.machine_id));
+        if (!midOk && ep.data?.machine_id != null) {
           setFilters((p) => ({ ...p, machine_id: String(ep.data.machine_id) }));
         }
       }
@@ -180,10 +182,19 @@ export default function ImmKpiDashboard() {
     ? zonesList
     : (hit?.zones || transfer?.zones || params?.zones || []);
 
-  const machineOptions = params?.equipment || [];
-  const selectedMachineName = params?.machine_name
-    || machineOptions.find((eq) => String(eq.id) === String(filters.machine_id))?.name
-    || '';
+  const isEnergyUtility = (eq) => {
+    const n = String(eq?.name || '').trim().toUpperCase();
+    const t = String(eq?.machine_type || '').trim().toUpperCase();
+    return t === 'ENERGY' || t === 'UTILITY' || t === 'METER'
+      || n === 'EM_PLANT' || n.startsWith('EM_') || n.startsWith('PANEL-');
+  };
+  const machineOptions = (params?.equipment || []).filter((eq) => !isEnergyUtility(eq));
+  const selectedMachineName = (
+    machineOptions.find((eq) => String(eq.id) === String(filters.machine_id))?.name
+    || (params?.machine_name && !isEnergyUtility({ name: params.machine_name }) ? params.machine_name : '')
+    || machineOptions[0]?.name
+    || ''
+  );
 
   const sel = {
     padding: '7px 10px',

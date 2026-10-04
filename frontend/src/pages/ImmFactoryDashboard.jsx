@@ -44,26 +44,47 @@ export default function ImmFactoryDashboard() {
   const [trendData, setTrendData] = useState(null);
   const [err, setErr] = useState('');
   const resetTilesRef = useRef(null);
+  const inflightRef = useRef(false);
+  const trendLoadedRef = useRef(false);
 
   const load = useCallback(async () => {
+    if (inflightRef.current) return;
+    inflightRef.current = true;
     try {
-      const [r, tr] = await Promise.all([
-        api.get('/api/imm/dashboard/factory'),
-        api.get('/api/imm/dashboard/factory/running-rate-trend'),
-      ]);
-      setData(r.data);
-      setTrendData(tr.data);
+      // Factory snapshot every poll; trend is heavier — refresh less often
+      const needTrend = !trendLoadedRef.current;
+      const reqs = [api.get('/api/imm/dashboard/factory')];
+      if (needTrend) reqs.push(api.get('/api/imm/dashboard/factory/running-rate-trend'));
+      const settled = await Promise.all(reqs);
+      setData(settled[0].data);
+      if (needTrend && settled[1]) {
+        setTrendData(settled[1].data);
+        trendLoadedRef.current = true;
+      }
       setErr('');
     } catch (e) {
       setErr(e.response?.data?.detail || e.message || 'Failed to load factory dashboard');
+    } finally {
+      inflightRef.current = false;
     }
   }, []);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    const id = setInterval(load, 5000);
+    const id = setInterval(load, 15000);
     return () => clearInterval(id);
   }, [load]);
+  useEffect(() => {
+    // Refresh trend on a slower cadence
+    const id = setInterval(async () => {
+      try {
+        const tr = await api.get('/api/imm/dashboard/factory/running-rate-trend');
+        setTrendData(tr.data);
+        trendLoadedRef.current = true;
+      } catch { /* ignore */ }
+    }, 60000);
+    return () => clearInterval(id);
+  }, []);
 
   const zones = data?.zones || [];
   const zoneBars = useMemo(

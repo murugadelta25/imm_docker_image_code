@@ -16,7 +16,7 @@ LD_UNLD_MAX_SEC = 60
 MICRO_GAP_SEC = 15
 STATE_LABELS = [
     ('running', 'Running'),
-    ('expected', 'Exp Hourly Output'),
+    ('expected', 'Possible Output'),
     ('ar', 'AR %'),
     ('pr', 'PR %'),
     ('qr', 'QR %'),
@@ -1316,10 +1316,14 @@ def _factory_station_ids(cfg: dict, factory_id: str) -> set:
     return ids
 
 
-def _scope_label(scope: str, cfg: dict, station_id, line_id, factory_id, db: Session) -> str:
+def _scope_label(scope: str, cfg: dict, station_id, line_id, factory_id, db: Session, machine_id=None) -> str:
     if scope == 'station' and station_id:
         st = db.query(Station).filter(Station.id == station_id).first()
-        return f"Station: {st.display_name if st else station_id}"
+        label = f"Station: {st.display_name if st else station_id}"
+        if machine_id:
+            m = db.query(Machine).filter(Machine.id == machine_id).first()
+            label += f" · Machine: {m.name if m else machine_id}"
+        return label
     if scope == 'line' and line_id:
         meta = _line_meta(cfg, line_id)
         return f"Line: {meta['label'] if meta else line_id}"
@@ -1330,9 +1334,12 @@ def _scope_label(scope: str, cfg: dict, station_id, line_id, factory_id, db: Ses
     return 'All machines (entire fleet)'
 
 
-def _filter_machines(machines: list, cfg: dict, scope: str, station_id, line_id, factory_id):
+def _filter_machines(machines: list, cfg: dict, scope: str, station_id, line_id, factory_id, machine_id=None):
     if scope == 'station' and station_id:
-        return [m for m in machines if m.station_id == station_id]
+        filtered = [m for m in machines if m.station_id == station_id]
+        if machine_id:
+            filtered = [m for m in filtered if m.id == machine_id]
+        return filtered
     if scope == 'line' and line_id:
         meta = _line_meta(cfg, line_id)
         if not meta:
@@ -1357,6 +1364,7 @@ def build_hourly_output(
     station_id: Optional[int] = None,
     line_id: Optional[str] = None,
     factory_id: Optional[str] = None,
+    machine_id: Optional[int] = None,
 ):
     cfg = _load_config(db)
     shifts = [s for s in cfg.get('shifts', []) if s.get('enabled', True)]
@@ -1370,7 +1378,7 @@ def build_hourly_output(
     if not shift_def:
         return {
             'slots': [], 'machines': [], 'scope': scope,
-            'scope_label': _scope_label(scope, cfg, station_id, line_id, factory_id, db),
+            'scope_label': _scope_label(scope, cfg, station_id, line_id, factory_id, db, machine_id),
         }
 
     break_cfg = (cfg.get('breaks') or {}).get(shift, {})
@@ -1386,7 +1394,7 @@ def build_hourly_output(
     shift_total_mins = int((shift_end - shift_start).total_seconds() / 60)
 
     all_machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
-    machines = _filter_machines(all_machines, cfg, scope, station_id, line_id, factory_id)
+    machines = _filter_machines(all_machines, cfg, scope, station_id, line_id, factory_id, machine_id)
 
     plans = db.query(ProductionPlan).filter(
         ProductionPlan.plan_date == entry_date,
@@ -1572,7 +1580,7 @@ def build_hourly_output(
             for b in breaks
         ],
         'scope': scope,
-        'scope_label': _scope_label(scope, cfg, station_id, line_id, factory_id, db),
+        'scope_label': _scope_label(scope, cfg, station_id, line_id, factory_id, db, machine_id),
         'machine_count': len(result_machines),
         'total_fleet': len(all_machines),
         'slots': [s['label'] for s in slots],
@@ -1677,13 +1685,16 @@ def get_hourly_output(
     shift: str = Query(...),
     scope: str = Query('all'),
     station_id: Optional[int] = None,
+    machine_id: Optional[int] = None,
     line_id: Optional[str] = None,
     factory_id: Optional[str] = None,
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
 ):
     try:
-        return build_hourly_output(db, entry_date, shift, scope, station_id, line_id, factory_id)
+        return build_hourly_output(
+            db, entry_date, shift, scope, station_id, line_id, factory_id, machine_id,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1694,12 +1705,15 @@ def download_hourly_output_xlsx(
     shift: str = Query(...),
     scope: str = Query('all'),
     station_id: Optional[int] = None,
+    machine_id: Optional[int] = None,
     line_id: Optional[str] = None,
     factory_id: Optional[str] = None,
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
 ):
-    payload = build_hourly_output(db, entry_date, shift, scope, station_id, line_id, factory_id)
+    payload = build_hourly_output(
+        db, entry_date, shift, scope, station_id, line_id, factory_id, machine_id,
+    )
     content = _build_xlsx(payload)
     fname = f"hourly_output_{entry_date}_{shift}.xlsx"
     return Response(

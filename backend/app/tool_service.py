@@ -4,9 +4,19 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from .models import ToolStock, ToolEvent, ToolAlert, WorkOrder, ProductionPlan, Machine, now_ist
+from .models import (
+    ToolStock,
+    ToolEvent,
+    ToolAlert,
+    WorkOrder,
+    ProductionPlan,
+    Machine,
+    ImmMold,
+    now_ist,
+)
 
 # Future step: enable QR scan acknowledgment for correction / replacement.
 QR_SCAN_ENABLED = False
@@ -290,6 +300,104 @@ def find_tool(db: Session, *, tool_code: Optional[str] = None, tool_name: Option
     if tool_name:
         return db.query(ToolStock).filter(ToolStock.tool_name == tool_name.strip()).first()
     return None
+
+
+def find_tool_by_mold_no(db: Session, mold_no: Optional[str]) -> Optional[ToolStock]:
+    """Resolve Mold Monitoring mold_no to Mold Management (ToolStock) master."""
+    key = (mold_no or "").strip()
+    if not key:
+        return None
+    tool = find_tool(db, tool_code=key, tool_name=key)
+    if tool:
+        return tool
+    low = key.lower()
+    # Case-insensitive match on code / name / part no
+    row = (
+        db.query(ToolStock)
+        .filter(
+            ToolStock.active == 1,
+            or_(
+                func.lower(ToolStock.tool_code) == low,
+                func.lower(ToolStock.tool_name) == low,
+                func.lower(ToolStock.part_no) == low,
+            ),
+        )
+        .first()
+    )
+    if row:
+        return row
+    # Active-cavity effective part_no (JSON) — small catalog, scan once
+    for t in db.query(ToolStock).filter(ToolStock.active == 1).all():
+        eff = effective_part_no(t)
+        if eff and str(eff).strip().lower() == low:
+            return t
+    return None
+
+
+def apply_shot_mold_usage(
+    db: Session,
+    machine_id: int,
+    shots: int,
+    *,
+    source: str = "shot",
+) -> Optional[dict]:
+    """Increment active ImmMold usage + linked ToolStock life when shots are counted.
+
+    Updates Mold Monitoring Uses / maintenance cycles and Mold Management
+    cycles_used + history (ToolEvent) so both stay in sync with shot count.
+    """
+    n = int(shots or 0)
+    if n <= 0:
+        return None
+
+    mold = (
+        db.query(ImmMold)
+        .filter(ImmMold.machine_id == machine_id, ImmMold.is_active == 1)
+        .first()
+    )
+    if not mold:
+        return None
+
+    mold.usage_count = int(mold.usage_count or 0) + n
+    mold.cycles_after_maintenance = int(mold.cycles_after_maintenance or 0) + n
+    mold.updated_at = now_ist()
+
+    machine = db.query(Machine).filter(Machine.id == machine_id).first()
+    location = machine.name if machine else f"Machine {machine_id}"
+
+    tool_payload = None
+    tool = find_tool_by_mold_no(db, mold.mold_no)
+    if tool:
+        before = float(tool.cycles_used or 0)
+        after = before + n
+        tool.cycles_used = after
+        tool.updated_at = now_ist()
+        refresh_tool_status(tool)
+        log_event(
+            db,
+            tool,
+            "shot",
+            cycles_before=before,
+            cycles_after=after,
+            machine_id=machine_id,
+            location=location,
+            notes=f"IMM shot cycle (+{n}) via {source}",
+        )
+        evaluate_stock_and_life_alerts(db, tool)
+        tool_payload = {
+            "tool_id": tool.id,
+            "tool_code": tool.tool_code,
+            "cycles_used": after,
+        }
+
+    return {
+        "mold_id": mold.id,
+        "mold_no": mold.mold_no,
+        "usage_count": mold.usage_count,
+        "cycles_after_maintenance": mold.cycles_after_maintenance,
+        "shots": n,
+        "tool": tool_payload,
+    }
 
 
 def _wo_tool_rows(wo: WorkOrder) -> list[dict]:

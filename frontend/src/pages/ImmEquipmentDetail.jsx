@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
@@ -8,11 +8,13 @@ import { assetUrl } from '../api/config';
 import PageHeader from '../components/PageHeader';
 import ImmDashboardSelector from '../components/ImmDashboardSelector';
 import Donut3D, { DONUT_CANVAS } from '../components/charts/Donut3D';
+import RejectionLogModal from '../components/RejectionLogModal';
 import { pulseLeadShape } from '../components/charts/pulseLeadLineShape.jsx';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useConfig, getCurrentShift } from '../context/ConfigContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
+import { formatRejectionNote } from '../constants/rejectionReasons';
 
 const TIME_PRESETS = [
   { label: '30 min', hours: 0.5, value: '0.5' },
@@ -81,6 +83,10 @@ export default function ImmEquipmentDetail() {
   const [dashSummary, setDashSummary] = useState(null);
   const [zoneMeta, setZoneMeta] = useState([]);
   const [kpivLoading, setKpivLoading] = useState(false);
+  const [rejectionModal, setRejectionModal] = useState({
+    open: false, initialJson: null, maxTotal: null, error: '', saving: false,
+    entryDate: null, shift: null,
+  });
 
   useEffect(() => {
     if (!shiftId && currentShift?.id) setShiftId(currentShift.id);
@@ -114,15 +120,23 @@ export default function ImmEquipmentDetail() {
     }
   }, [machineId, hours, rangeMode, shiftId, appliedCustom]);
 
-  const fetchDash = useCallback(async () => {
+  const zonesLoadedRef = useRef(false);
+  const inflightLiveRef = useRef(false);
+
+  const fetchDash = useCallback(async ({ withZones = false } = {}) => {
     try {
-      const [eq, zones] = await Promise.all([
-        api.get(`/api/imm/dashboard/equipment/${machineId}`),
-        api.get('/api/imm/dashboard/zones'),
-      ]);
+      const reqs = [api.get(`/api/imm/dashboard/equipment/${machineId}`)];
+      if (withZones || !zonesLoadedRef.current) {
+        reqs.push(api.get('/api/imm/dashboard/zones'));
+      }
+      const settled = await Promise.all(reqs);
+      const eq = settled[0];
       setDashSummary(eq.data);
       setSiblings(eq.data?.siblings || []);
-      setZoneMeta(zones.data?.zones || []);
+      if (settled[1]) {
+        setZoneMeta(settled[1].data?.zones || []);
+        zonesLoadedRef.current = true;
+      }
     } catch {
       /* optional enrichment */
     }
@@ -130,21 +144,30 @@ export default function ImmEquipmentDetail() {
 
   const refresh = useCallback(async () => {
     try {
-      await Promise.all([fetchDetail(), fetchKpiv(), fetchDash()]);
+      await Promise.all([fetchDetail(), fetchKpiv(), fetchDash({ withZones: true })]);
       setMsg('');
     } catch (err) {
       setMsg(err.response?.data?.detail || err.message || 'Failed to load');
     }
   }, [fetchDetail, fetchKpiv, fetchDash]);
 
+  // Live poll: equipment + detail only (skip KPIV charts + /zones every tick)
   const refreshLive = useCallback(async () => {
-    await refresh();
-  }, [refresh]);
+    if (inflightLiveRef.current) return;
+    inflightLiveRef.current = true;
+    try {
+      await Promise.all([fetchDetail(), fetchDash({ withZones: false })]);
+    } catch {
+      /* ignore transient live errors */
+    } finally {
+      inflightLiveRef.current = false;
+    }
+  }, [fetchDetail, fetchDash]);
 
-  useEffect(() => { refreshLive(); }, [refreshLive]);
+  useEffect(() => { refresh(); }, [refresh]);
 
   useEffect(() => {
-    const id = setInterval(refreshLive, 10000);
+    const id = setInterval(refreshLive, 15000);
     return () => clearInterval(id);
   }, [refreshLive]);
 
@@ -249,9 +272,16 @@ export default function ImmEquipmentDetail() {
     return {
       mold: stripCjk(masterName || (!isCode(plcMold) ? plcMold : null) || mold?.mold_no || plcMold || '—'),
       material: stripCjk(pv('Actual_Material_Name') || mold?.master?.rm_grade || '—'),
-      cavity: stripCjk(pv('Actual_Cavity_No') || mold?.master?.running_cavity || mold?.master?.active_cavity_name || '—'),
+      cavity: stripCjk(
+        dashSummary?.prod_counts?.running_cavity
+        || dashSummary?.production?.actual_cav
+        || pv('Actual_Cavity_No')
+        || mold?.master?.running_cavity
+        || mold?.master?.active_cavity_name
+        || '—',
+      ),
     };
-  }, [pv, mold, detail?.mold_master]);
+  }, [pv, mold, detail?.mold_master, dashSummary?.prod_counts?.running_cavity, dashSummary?.production?.actual_cav]);
 
   const modeFlags = useMemo(() => ([
     { key: 'Auto_Mode', label: 'Auto Mode', on: isOn('Auto_Mode') },
@@ -260,12 +290,104 @@ export default function ImmEquipmentDetail() {
     { key: 'Robot_Running_Status', label: 'Robot Status', on: isOn('Robot_Running_Status') },
   ]), [isOn]);
 
-  const prodCounts = useMemo(() => ([
-    { label: labelIn('Prod Target Count', 'Nos.'), value: fmt('Production_Target_Count') },
-    { label: labelIn('Act Prod Count', 'Nos.'), value: fmt('Actual_Production_Count') },
-    { label: labelIn('Good Count', 'Nos.'), value: fmt('Total_Good_Count') },
-    { label: labelIn('Bad Count', 'Nos.'), value: fmt('Total_Bad_Count') },
-  ]), [fmt]);
+  const prodCounts = useMemo(() => {
+    const pc = dashSummary?.prod_counts || {};
+    const n = (v) => (v == null || v === '' ? '—' : Number(v).toLocaleString());
+    return [
+      {
+        key: 'prod_target',
+        label: labelIn('Prod Target Count', 'Nos.'),
+        value: Object.prototype.hasOwnProperty.call(pc, 'prod_target')
+          ? n(pc.prod_target)
+          : fmt('Production_Target_Count'),
+        shift: false,
+      },
+      {
+        key: 'act_prod',
+        label: labelIn('Act Prod Count', 'Nos.'),
+        value: pc.act_prod != null ? n(pc.act_prod) : fmt('Actual_Production_Count'),
+        shift: false,
+      },
+      {
+        key: 'good',
+        label: labelIn('Good Count', 'Nos.'),
+        value: pc.good != null ? n(pc.good) : fmt('Total_Good_Count'),
+        shift: false,
+      },
+      {
+        key: 'bad',
+        label: labelIn('Bad Count', 'Nos.'),
+        value: pc.bad != null ? n(pc.bad) : fmt('Total_Bad_Count'),
+        shift: false,
+        actionable: true,
+      },
+      { key: 'shift_prod_target', label: labelIn('Shift Prod Target Count', 'Nos.'), value: n(pc.shift_prod_target), shift: true },
+      { key: 'shift_act_prod', label: labelIn('Shift Act Prod Count', 'Nos.'), value: n(pc.shift_act_prod), shift: true },
+      { key: 'shift_good', label: labelIn('Shift Good Count', 'Nos.'), value: n(pc.shift_good), shift: true },
+      {
+        key: 'shift_bad',
+        label: labelIn('Shift Bad Count', 'Nos.'),
+        value: n(pc.shift_bad),
+        shift: true,
+        actionable: true,
+      },
+    ];
+  }, [fmt, dashSummary?.prod_counts]);
+
+  const openRejectionLog = async () => {
+    const pc = dashSummary?.prod_counts || {};
+    const entryDate = pc.entry_date;
+    const shift = pc.shift_id;
+    if (!machineId || !entryDate || !shift) {
+      setMsg('Cannot open Rejection Log — shift/date not available.');
+      return;
+    }
+    let initialJson = null;
+    let maxTotal = Number(pc.shift_act_prod) || 0;
+    try {
+      const r = await api.get('/api/oee/rejection/by-machine', {
+        params: { machine_id: machineId, entry_date: entryDate, shift },
+      });
+      initialJson = r.data?.rejection_json || null;
+      if (r.data?.actual_qty != null) maxTotal = Number(r.data.actual_qty) || maxTotal;
+    } catch { /* empty */ }
+    setRejectionModal({
+      open: true,
+      initialJson,
+      maxTotal,
+      error: '',
+      saving: false,
+      entryDate,
+      shift,
+    });
+  };
+
+  const saveRejectionLog = async ({ quantities, total }) => {
+    if (!rejectionModal.entryDate || !rejectionModal.shift) return;
+    setRejectionModal((p) => ({ ...p, saving: true, error: '' }));
+    try {
+      await api.patch('/api/oee/defect/by-machine', {
+        machine_id: Number(machineId),
+        entry_date: rejectionModal.entryDate,
+        shift: rejectionModal.shift,
+        defect_qty: total,
+        note: formatRejectionNote(quantities),
+        rejection_reasons: quantities,
+      });
+      setRejectionModal({
+        open: false, initialJson: null, maxTotal: null, error: '', saving: false,
+        entryDate: null, shift: null,
+      });
+      setMsg('✓ Rejection log saved');
+      fetchDash();
+    } catch (e) {
+      setRejectionModal((p) => ({
+        ...p,
+        saving: false,
+        error: e.response?.data?.detail || e.message || 'Failed to save rejection log',
+      }));
+    }
+  };
 
   const setActualRows = useMemo(() => ([
     { setLabel: labelIn('Last Cycle Time', 'Sec'), setKey: 'Last_Cycle_Time', actLabel: labelIn('Act. Cycle Time', 'Sec'), actKey: 'Actual_Cycle_Time' },
@@ -547,15 +669,15 @@ export default function ImmEquipmentDetail() {
             {Object.keys(opcuaHighlights).length > 0 && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
                 {[
-                  ['Cycle', opcuaHighlights.Actual_Cycle_Time],
-                  ['Prod', opcuaHighlights.Actual_Production_Count],
-                  ['Nozzle °C', opcuaHighlights.Actual_Nozzle_Temp],
-                  ['Barrel1 °C', opcuaHighlights.Actual_Cylender_1_Temp],
+                  ['Cycle', opcuaHighlights.Actual_Cycle_Time?.value_text ?? opcuaHighlights.Actual_Cycle_Time?.value_num ?? '—'],
+                  ['Prod', dashSummary?.production?.quantity ?? opcuaHighlights.Actual_Production_Count?.value_text ?? opcuaHighlights.Actual_Production_Count?.value_num ?? '—'],
+                  ['Nozzle °C', opcuaHighlights.Actual_Nozzle_Temp?.value_text ?? opcuaHighlights.Actual_Nozzle_Temp?.value_num ?? '—'],
+                  ['Barrel1 °C', opcuaHighlights.Actual_Cylender_1_Temp?.value_text ?? opcuaHighlights.Actual_Cylender_1_Temp?.value_num ?? '—'],
                 ].map(([label, v]) => (
                   <div key={label} style={{ background: t.surface2, borderRadius: 8, padding: '8px 10px' }}>
                     <div style={{ fontSize: 11, color: t.textMuted }}>{label}</div>
                     <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>
-                      {v?.value_text ?? v?.value_num ?? '—'}
+                      {stripCjk(v ?? '—')}
                     </div>
                   </div>
                 ))}
@@ -763,12 +885,36 @@ export default function ImmEquipmentDetail() {
         </div>
 
         <div style={s.hmiProdRow}>
-          {prodCounts.map((c) => (
-            <div key={c.label} style={s.hmiProdCell}>
-              <span style={s.hmiLabel}>{c.label}</span>
-              <span style={s.hmiValue}>{c.value}</span>
-            </div>
-          ))}
+          {prodCounts.map((c) => {
+            const clickable = c.actionable;
+            const Cell = clickable ? 'button' : 'div';
+            return (
+              <Cell
+                key={c.key}
+                type={clickable ? 'button' : undefined}
+                title={clickable ? 'Open Rejection Log' : undefined}
+                onClick={clickable ? openRejectionLog : undefined}
+                style={{
+                  ...s.hmiProdCell,
+                  ...(c.shift ? s.hmiProdCellShift : null),
+                  ...(clickable ? {
+                    cursor: 'pointer',
+                    borderColor: '#ef4444',
+                    textAlign: 'left',
+                  } : null),
+                }}
+              >
+                <span style={{
+                  ...s.hmiLabel,
+                  ...(c.shift ? s.hmiLabelShift : null),
+                  ...(clickable ? { textDecoration: 'underline', textDecorationStyle: 'dotted', color: '#ef4444' } : null),
+                }}>
+                  {c.label}
+                </span>
+                <span style={{ ...s.hmiValue, ...(c.shift ? s.hmiValueShift : null) }}>{c.value}</span>
+              </Cell>
+            );
+          })}
         </div>
 
         <div style={s.hmiTableWrap}>
@@ -938,6 +1084,25 @@ export default function ImmEquipmentDetail() {
           </div>
         </div>
       )}
+
+      <RejectionLogModal
+        open={rejectionModal.open}
+        theme={t}
+        subtitle={
+          dashSummary?.equipment_info?.name
+            ? `${stripCjk(dashSummary.equipment_info.name)} · ${rejectionModal.entryDate || ''} · Shift ${rejectionModal.shift || ''}`
+            : ''
+        }
+        initialJson={rejectionModal.initialJson}
+        maxTotal={rejectionModal.maxTotal}
+        busy={rejectionModal.saving}
+        error={rejectionModal.error}
+        onClose={() => setRejectionModal({
+          open: false, initialJson: null, maxTotal: null, error: '', saving: false,
+          entryDate: null, shift: null,
+        })}
+        onSave={saveRejectionLog}
+      />
     </div>
   );
 }
@@ -1124,8 +1289,13 @@ function styles(t) {
       padding: '10px 12px',
       borderRight: `1px solid ${t.border}`,
     },
+    hmiProdCellShift: {
+      background: 'rgba(249, 115, 22, 0.10)',
+    },
     hmiLabel: { color: t.labelColor || t.accent, fontWeight: 700, fontSize: 12 },
+    hmiLabelShift: { color: '#f97316' },
     hmiValue: { color: t.text, fontWeight: 800, fontSize: 14, textAlign: 'right' },
+    hmiValueShift: { color: '#fb923c' },
     hmiTableWrap: { overflowX: 'auto' },
     hmiTable: {
       width: '100%',

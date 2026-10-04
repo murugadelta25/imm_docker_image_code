@@ -40,8 +40,11 @@ ZONE_PALETTE = [
 
 
 def _zone_machine_map(db: Session) -> Tuple[List[dict], Dict[str, List[int]], Dict[int, Machine]]:
+    from ..energy_meter import is_energy_utility_machine, iter_production_machines
+
     stations = {s.id: s for s in db.query(Station).all()}
-    machines = db.query(Machine).order_by(Machine.station_id, Machine.name).all()
+    # Production IMMs only — exclude EM_PLANT / energy utility hosts from KPI pickers
+    machines = iter_production_machines(db, order=True)
     by_id = {m.id: m for m in machines}
     factories = _load_factory_tree(db)
     zones_meta = _build_zones_from_config(factories, stations, machines)
@@ -49,7 +52,11 @@ def _zone_machine_map(db: Session) -> Tuple[List[dict], Dict[str, List[int]], Di
     zones = []
     for z in zones_meta:
         sids = set(z.get("station_ids") or [])
-        mids = [m.id for m in machines if m.station_id in sids]
+        mids = [
+            m.id
+            for m in machines
+            if m.station_id in sids and not is_energy_utility_machine(m)
+        ]
         # also location-path machines already merged in station_ids by dashboard builder
         zone_machines[str(z["id"])] = mids
         zones.append(
@@ -694,7 +701,13 @@ def hit_rate_history(
                 hl = highlights_for_machine(db, mid)
             except Exception:
                 hl = {}
-            live_running[mid] = eap_imm_status_from_opcua_highlights(hl) == "running"
+            m_live = machines.get(mid)
+            live_running[mid] = eap_imm_status_from_opcua_highlights(
+                hl,
+                machine_name=getattr(m_live, "name", None),
+                plc_source=getattr(m_live, "plc_source", None),
+                db=db,
+            ) == "running"
 
     equipment = []
     for mid in mids:
@@ -810,15 +823,22 @@ def equipment_parameter_history(
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
 ):
+    from ..energy_meter import is_energy_utility_machine
+
     zones, zone_machines, machines = _zone_machine_map(db)
     zone = None
     if zones:
         zone = next((z for z in zones if zone_id and str(z["id"]) == str(zone_id)), None) or zones[0]
     mids = zone_machines.get(zone["id"]) if zone else list(machines.keys())
-    mids = mids or list(machines.keys())
+    mids = [
+        mid
+        for mid in (mids or list(machines.keys()))
+        if mid in machines and not is_energy_utility_machine(machines[mid])
+    ]
 
-    equipment = [{"id": mid, "name": machines[mid].name} for mid in mids if mid in machines]
-    mid = machine_id if machine_id in (mids or []) else (mids[0] if mids else None)
+    equipment = [{"id": mid, "name": machines[mid].name} for mid in mids]
+    # Ignore stale client selection of EM_PLANT / non-production hosts
+    mid = machine_id if machine_id in mids else (mids[0] if mids else None)
     charts = {}
     if mid:
         # ensure thresholds exist for nicer standard/limit lines

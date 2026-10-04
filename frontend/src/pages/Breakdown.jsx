@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import api from '../api/client';
 import { assetUrl } from '../api/config';
@@ -36,12 +37,24 @@ const STATUS_STYLE = {
   offline:        { color: '#6b7280', bg: '#6b728015', label: 'Offline' },
 };
 
+const PLANNED_REASONS = [
+  'Machine Preventive', 'Meeting', 'RM Change', 'Plant Shutdown', 'No Plan',
+  'Mould Change', 'Colour Change', 'Insert Change', 'Mould Trial', 'Power Fail',
+];
+
+const UNPLANNED_REASONS = [
+  'Machine Maintenance', 'No RM', 'Chiller Maintenance', 'Compressor Maintenance',
+  'Mould Maintenance', 'QC Issue', 'No Manpower', 'Hopper Issue', 'Crane Issue',
+  'No BOP', 'Machine Breakdown', 'Mould Polish', 'Mould Breakdown', 'RM Predrying',
+  'Hrs Problem', 'Barrel Heating Problem', 'No Packing Material', 'Water Leakage',
+  'Oil Leakage',
+];
+
 function effectiveStatus(status, durationMs) {
   if (status === 'idle' && durationMs < 60000) return 'ld/unld';
   return status;
 }
 
-// Parse IST string returned by backend (format: 'YYYY-MM-DD HH:MM:SS IST' or 'YYYY-MM-DDTHH:MM:SS')
 function parseIST(str) {
   if (!str) return null;
   return new Date(str.replace(' IST', '').replace(' ', 'T'));
@@ -66,21 +79,355 @@ function durationLabel(ms) {
   return `${s}s`;
 }
 
+function ReasonButton({ label, selected, onClick, accent, mutedBorder, surface, text }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'stretch',
+        width: '100%',
+        padding: 0,
+        borderRadius: 8,
+        border: `1.5px solid ${selected ? accent : mutedBorder}`,
+        background: selected ? accent + '18' : surface,
+        cursor: 'pointer',
+        overflow: 'hidden',
+        textAlign: 'left',
+      }}
+    >
+      <div style={{
+        height: 5,
+        background: selected ? '#22c55e' : '#ef4444',
+        opacity: selected ? 1 : 0.85,
+      }} />
+      <div style={{
+        padding: '10px 12px',
+        color: selected ? accent : text,
+        fontSize: 12,
+        fontWeight: selected ? 700 : 600,
+        lineHeight: 1.3,
+      }}>
+        {label}
+      </div>
+    </button>
+  );
+}
+
+function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy, msg }) {
+  const [downtimeType, setDowntimeType] = useState(null);
+  const [reason, setReason] = useState('');
+  const [raisedMode, setRaisedMode] = useState(
+    user && ['operator', 'supervisor'].includes(user.role) ? 'select' : 'select'
+  );
+  const [raisedBy, setRaisedBy] = useState(
+    user && ['operator', 'supervisor'].includes(user.role) ? String(user.id) : ''
+  );
+  const [raisedByName, setRaisedByName] = useState(user?.username || '');
+  const [notes, setNotes] = useState('');
+
+  const selectReason = (type, value) => {
+    setDowntimeType(type);
+    setReason(value);
+  };
+
+  const canSubmit = reason && downtimeType && (
+    (raisedMode === 'select' && raisedBy) ||
+    (raisedMode === 'enter' && raisedByName.trim())
+  );
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!canSubmit || busy) return;
+    onSubmit({
+      machine_id: machine.id,
+      downtime_type: downtimeType,
+      downtime_reason: reason,
+      raised_by: raisedMode === 'select' ? parseInt(raisedBy, 10) : (user?.id || null),
+      raised_by_name: raisedMode === 'enter' ? raisedByName.trim() : null,
+      description: notes.trim() || undefined,
+    });
+  };
+
+  const inp = {
+    padding: '8px 12px', borderRadius: 6, border: `1px solid ${t.inpBorder}`,
+    background: t.inp, color: t.text, fontSize: 13, width: '100%',
+  };
+
+  const unplannedLeft = UNPLANNED_REASONS.slice(0, 10);
+  const unplannedRight = UNPLANNED_REASONS.slice(10);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Log downtime"
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 16,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 'min(960px, 100%)',
+          maxHeight: '92vh',
+          overflow: 'auto',
+          background: t.surface,
+          borderRadius: 12,
+          border: `1px solid ${t.border}`,
+          boxShadow: '0 20px 50px rgba(0,0,0,0.35)',
+        }}
+      >
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          padding: '14px 18px', borderBottom: `1px solid ${t.border}`,
+          background: t.surface2, position: 'sticky', top: 0, zIndex: 1,
+        }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>Downtime</div>
+            <div style={{ fontSize: 12, color: t.accent, marginTop: 2 }}>
+              {machine.name}
+              {machine.machine_type ? ` · ${machine.machine_type}` : ''}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              background: 'none', border: `1px solid ${t.border}`, borderRadius: 6,
+              color: t.textMuted, cursor: 'pointer', padding: '4px 10px', fontSize: 13,
+            }}
+          >
+            ✕ Close
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} style={{ padding: 18 }}>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+            gap: 16,
+          }}>
+            {/* Planned */}
+            <section style={{
+              background: t.surface2, borderRadius: 10, padding: 14,
+              border: `1px solid ${t.border}`,
+            }}>
+              <h4 style={{
+                margin: '0 0 12px', fontSize: 13, fontWeight: 700, color: '#2482da',
+                textTransform: 'uppercase', letterSpacing: 0.4,
+              }}>
+                Planned Downtime
+              </h4>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {PLANNED_REASONS.map(r => (
+                  <ReasonButton
+                    key={r}
+                    label={r}
+                    selected={downtimeType === 'planned' && reason === r}
+                    onClick={() => selectReason('planned', r)}
+                    accent="#2482da"
+                    mutedBorder={t.border}
+                    surface={t.surface}
+                    text={t.text}
+                  />
+                ))}
+              </div>
+            </section>
+
+            {/* Unplanned */}
+            <section style={{
+              background: t.surface2, borderRadius: 10, padding: 14,
+              border: `1px solid ${t.border}`,
+            }}>
+              <h4 style={{
+                margin: '0 0 12px', fontSize: 13, fontWeight: 700, color: '#ef4444',
+                textTransform: 'uppercase', letterSpacing: 0.4,
+              }}>
+                Unplanned Downtime
+              </h4>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: 8,
+                alignItems: 'start',
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {unplannedLeft.map(r => (
+                    <ReasonButton
+                      key={r}
+                      label={r}
+                      selected={downtimeType === 'unplanned' && reason === r}
+                      onClick={() => selectReason('unplanned', r)}
+                      accent="#ef4444"
+                      mutedBorder={t.border}
+                      surface={t.surface}
+                      text={t.text}
+                    />
+                  ))}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {unplannedRight.map(r => (
+                    <ReasonButton
+                      key={r}
+                      label={r}
+                      selected={downtimeType === 'unplanned' && reason === r}
+                      onClick={() => selectReason('unplanned', r)}
+                      accent="#ef4444"
+                      mutedBorder={t.border}
+                      surface={t.surface}
+                      text={t.text}
+                    />
+                  ))}
+                </div>
+              </div>
+            </section>
+          </div>
+
+          {/* Selected summary */}
+          <div style={{
+            marginTop: 14, padding: '10px 12px', borderRadius: 8,
+            background: reason ? (downtimeType === 'planned' ? '#2482da18' : '#ef444418') : t.surface2,
+            border: `1px solid ${reason ? (downtimeType === 'planned' ? '#2482da55' : '#ef444455') : t.border}`,
+            fontSize: 13, color: t.text,
+          }}>
+            {reason
+              ? <>Selected: <b>{downtimeType === 'planned' ? 'Planned' : 'Unplanned'}</b> — {reason}</>
+              : 'Select a downtime reason above'}
+          </div>
+
+          {/* Raised by */}
+          <div style={{
+            marginTop: 16, padding: 14, borderRadius: 10,
+            border: `1px solid ${t.border}`, background: t.surface2,
+          }}>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              marginBottom: 10, flexWrap: 'wrap', gap: 8,
+            }}>
+              <h4 style={{ margin: 0, fontSize: 13, color: t.accent }}>Raised By</h4>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[
+                  ['select', 'Select user'],
+                  ['enter', 'Enter name'],
+                ].map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setRaisedMode(mode)}
+                    style={{
+                      padding: '5px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+                      border: `1px solid ${raisedMode === mode ? t.accent : t.border}`,
+                      background: raisedMode === mode ? t.accent + '22' : t.surface,
+                      color: raisedMode === mode ? t.accent : t.textMuted,
+                      fontWeight: raisedMode === mode ? 700 : 500,
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {raisedMode === 'select' ? (
+              <select
+                style={inp}
+                value={raisedBy}
+                onChange={e => setRaisedBy(e.target.value)}
+                required
+              >
+                <option value="">Select raised by…</option>
+                {users.map(u => (
+                  <option key={u.id} value={u.id}>{u.username} ({u.role})</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                style={inp}
+                placeholder="Enter name of person raising the downtime"
+                value={raisedByName}
+                onChange={e => setRaisedByName(e.target.value)}
+                required
+              />
+            )}
+
+            <input
+              style={{ ...inp, marginTop: 10 }}
+              placeholder="Optional notes…"
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+            />
+          </div>
+
+          <div style={{
+            display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
+            gap: 10, marginTop: 16, flexWrap: 'wrap',
+          }}>
+            {msg && (
+              <span style={{
+                color: msg.startsWith('✓') ? '#10b981' : '#ef4444',
+                fontSize: 13, marginRight: 'auto',
+              }}>
+                {msg}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 13,
+                border: `1px solid ${t.border}`, background: t.surface, color: t.textMuted,
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!canSubmit || busy}
+              style={{
+                padding: '8px 20px', borderRadius: 6, cursor: canSubmit && !busy ? 'pointer' : 'not-allowed',
+                border: 'none', fontWeight: 700, fontSize: 13, color: '#fff',
+                background: canSubmit && !busy
+                  ? (downtimeType === 'planned' ? '#2482da' : '#ef4444')
+                  : t.border,
+                opacity: canSubmit && !busy ? 1 : 0.7,
+              }}
+            >
+              {busy ? 'Logging…' : 'Log Downtime'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function Breakdown() {
   const { user } = useAuth();
   const { theme: t } = useTheme();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkHandled = useRef(false);
   const [tab, setTab] = useState('breakdown');
   const [machines, setMachines] = useState([]);
   const [stations, setStations] = useState([]);
   const [tickets, setTickets] = useState([]);
   const [users, setUsers] = useState([]);
-  const [form, setForm, { resetPersisted }] = usePersistedState(DRAFT_KEYS.breakdown, {
+  const [form, setForm] = usePersistedState(DRAFT_KEYS.breakdown, {
     station_id: '', machine_id: '', raised_by: '', description: '',
   });
   const [msg, setMsg] = useState('');
+  const [modalMsg, setModalMsg] = useState('');
   const [statusLog, setStatusLog] = useState([]);
   const [logMachineId, setLogMachineId] = useState('');
   const [logFilter, setLogFilter] = useState('');
+  const [selectedMachine, setSelectedMachine] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const fetchData = useCallback(async () => {
     const [p, m, tk, us] = await Promise.all([
@@ -100,7 +447,32 @@ export default function Breakdown() {
   useEffect(() => {
     if (user && ['operator', 'supervisor'].includes(user.role))
       setForm(f => ({ ...f, raised_by: String(user.id) }));
-  }, [user]);
+  }, [user, setForm]);
+
+  // Deep-link from Zone Dashboard: /breakdown?machineId=…
+  useEffect(() => {
+    const mid = parseInt(searchParams.get('machineId') || searchParams.get('machine_id') || '', 10);
+    if (!mid) {
+      deepLinkHandled.current = false;
+      return;
+    }
+    if (deepLinkHandled.current || !machines.length) return;
+    const m = machines.find((x) => x.id === mid);
+    if (!m) return;
+    deepLinkHandled.current = true;
+    setTab('breakdown');
+    const active = tickets.filter((tk) => tk.machine_id === mid && tk.status !== 'resolved');
+    if (active.length > 0) {
+      setMsg(`✗ ${m.name} already has an active downtime ticket (#${active[0].id})`);
+    } else if (user?.role === 'operator' || user?.role === 'admin' || user?.role === 'supervisor') {
+      setModalMsg('');
+      setSelectedMachine(m);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('machineId');
+    next.delete('machine_id');
+    setSearchParams(next, { replace: true });
+  }, [machines, tickets, searchParams, setSearchParams, user]);
 
   useWebSocket(useCallback(msg => {
     if (['breakdown_raised','breakdown_acknowledged','breakdown_in_progress','breakdown_resolved'].includes(msg.type))
@@ -121,21 +493,60 @@ export default function Breakdown() {
     if (tab === 'log' && logMachineId) fetchStatusLog(logMachineId);
   }, [tab, logMachineId, fetchStatusLog]);
 
+  const machineTickets = (machineId) => tickets.filter(t => t.machine_id === machineId && t.status !== 'resolved');
+
+  const openDowntimeModal = (machine) => {
+    if (!(user?.role === 'operator' || user?.role === 'admin' || user?.role === 'supervisor')) return;
+    const active = machineTickets(machine.id);
+    if (active.length > 0) {
+      setMsg(`✗ ${machine.name} already has an active downtime ticket (#${active[0].id})`);
+      return;
+    }
+    setModalMsg('');
+    setSelectedMachine(machine);
+  };
+
+  const logDowntime = async (payload) => {
+    setSubmitting(true);
+    setModalMsg('');
+    try {
+      await api.post('/api/breakdown/', payload);
+      setModalMsg('✓ Downtime logged');
+      setMsg(`✓ Downtime logged for ${selectedMachine?.name || 'machine'}`);
+      setTimeout(() => {
+        setSelectedMachine(null);
+        setModalMsg('');
+      }, 600);
+      fetchData();
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      setModalMsg(`✗ ${typeof detail === 'string' ? detail : 'Error logging downtime'}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const raiseTicket = async e => {
     e.preventDefault();
     try {
       await api.post('/api/breakdown/', {
         machine_id: parseInt(form.machine_id, 10),
         raised_by: parseInt(form.raised_by, 10),
-        description: form.description
+        description: form.description,
+        downtime_type: 'unplanned',
+        downtime_reason: 'Machine Breakdown',
       });
       setMsg('✓ Ticket raised');
-      setForm({ station_id: pairs[0]?.id || '', machine_id: '', raised_by: String(user?.id || ''), description: '' });
+      setForm({
+        station_id: stations[0]?.id || '',
+        machine_id: '',
+        raised_by: String(user?.id || ''),
+        description: '',
+      });
       fetchData();
     } catch { setMsg('✗ Error raising ticket'); }
   };
 
-  const machineTickets = (machineId) => tickets.filter(t => t.machine_id === machineId && t.status !== 'resolved');
   const filteredMachines = form.station_id ? machines.filter(m => m.station_id === parseInt(form.station_id, 10)) : machines;
 
   const formatDate = value => {
@@ -146,13 +557,18 @@ export default function Breakdown() {
     return `${p(d.getDate())}-${p(d.getMonth()+1)}-${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   };
 
+  const raisedByLabel = (tk) =>
+    tk.raised_by_name || tk.raised_by_username || tk.raised_by || '';
+
   const downloadExcel = () => {
     if (!tickets.length) return;
     const rows = tickets.map(tk => ({
       'Ticket #': tk.id,
-      'Raised By': tk.raised_by_username || tk.raised_by || '',
+      'Raised By': raisedByLabel(tk),
       'Acknowledged By': tk.acknowledged_by_username || tk.acknowledged_by || '',
       Machine: machines.find(m => m.id === tk.machine_id)?.name || tk.machine_id,
+      Type: tk.downtime_type || '',
+      Reason: tk.downtime_reason || '',
       Status: tk.status, Description: tk.description,
       'Resolution Notes': tk.resolution_notes || '',
       'Raised At': tk.created_at ? formatDate(tk.created_at) : '',
@@ -175,6 +591,8 @@ export default function Breakdown() {
     color: tab === key ? t.accent : t.textMuted, fontWeight: tab === key ? 600 : 400,
   });
 
+  const canLog = user?.role === 'operator' || user?.role === 'admin' || user?.role === 'supervisor';
+
   return (
     <div className={pageClass(t)} style={{ padding: 20, background: t.bg, minHeight: 'calc(100vh - 52px)', color: t.text }}>
       <PageHeader title="BREAKDOWN MANAGEMENT" onRefresh={fetchData}
@@ -182,7 +600,6 @@ export default function Breakdown() {
                                 borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
                  onClick={downloadExcel}>⬇ Download Excel</button>} />
 
-      {/* Tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: `2px solid ${t.border}` }}>
         <button style={tabBtn('breakdown')} onClick={() => setTab('breakdown')}>🔴 Breakdown</button>
         <button style={tabBtn('log')} onClick={() => {
@@ -192,9 +609,23 @@ export default function Breakdown() {
       </div>
 
       {tab === 'breakdown' && (<>
-        {/* Machine Layout */}
         <div style={card}>
-          <h4 style={{ color: t.accent, margin: '0 0 16px', fontSize: 14 }}>Machine Status Layout</h4>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+            <h4 style={{ color: t.accent, margin: 0, fontSize: 14 }}>Machine Status Layout</h4>
+            {canLog && (
+              <span style={{ fontSize: 12, color: t.textMuted }}>
+                Click a machine to log planned / unplanned downtime
+              </span>
+            )}
+          </div>
+          {msg && (
+            <div style={{
+              marginBottom: 12, fontSize: 13,
+              color: msg.startsWith('✓') ? '#10b981' : '#ef4444',
+            }}>
+              {msg}
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
             {machines.map(m => {
               const activeTickets = machineTickets(m.id);
@@ -203,9 +634,19 @@ export default function Breakdown() {
               const station = stations.find(s => s.id === m.station_id);
               const stationLabel = station ? (station.display_name || station.name || `Station ${station.id}`) : `Station ${m.station_id || '—'}`;
               return (
-                <div key={m.id} style={{ background: t.surface2, borderRadius: 10, padding: 14,
-                                         border: `2px solid ${mStatus.color}`, textAlign: 'center',
-                                         position: 'relative', transition: 'border-color 0.3s' }}>
+                <div
+                  key={m.id}
+                  onClick={() => openDowntimeModal(m)}
+                  title={canLog ? (activeTickets.length ? 'Active downtime ticket exists' : 'Click to log downtime') : undefined}
+                  style={{
+                    background: t.surface2, borderRadius: 10, padding: 14,
+                    border: `2px solid ${mStatus.color}`, textAlign: 'center',
+                    position: 'relative', transition: 'border-color 0.3s, transform 0.15s',
+                    cursor: canLog ? 'pointer' : 'default',
+                  }}
+                  onMouseEnter={e => { if (canLog) e.currentTarget.style.transform = 'translateY(-2px)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.transform = 'none'; }}
+                >
                   <div style={{ position: 'relative', width: 80, height: 80, margin: '0 auto 10px' }}>
                     {isRunning && (
                       <div style={{ position: 'absolute', inset: -4, borderRadius: '50%',
@@ -259,11 +700,19 @@ export default function Breakdown() {
                   {m.plc_source && m.plc_source !== 'manual' && (
                     <div style={{ color: t.textFaint, fontSize: 10, marginBottom: 4 }}>📡 {m.plc_source.toUpperCase()}</div>
                   )}
+                  {canLog && activeTickets.length === 0 && (
+                    <div style={{
+                      marginTop: 6, fontSize: 11, fontWeight: 600, color: t.accent,
+                      background: t.accent + '15', borderRadius: 6, padding: '4px 8px',
+                    }}>
+                      + Log Downtime
+                    </div>
+                  )}
                   {activeTickets.map(tk => (
                     <div key={tk.id} style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, marginTop: 4,
                                               color: t.text, border: `1px solid ${STATUS_CONFIG[tk.status]?.color}`,
                                               background: STATUS_CONFIG[tk.status]?.color + '22' }}>
-                      {STATUS_CONFIG[tk.status]?.icon} #{tk.id} {tk.status}
+                      {STATUS_CONFIG[tk.status]?.icon} #{tk.id} {tk.downtime_reason || tk.status}
                     </div>
                   ))}
                 </div>
@@ -272,10 +721,12 @@ export default function Breakdown() {
           </div>
         </div>
 
-        {/* Raise Ticket */}
-        {(user?.role === 'operator' || user?.role === 'admin' || user?.role === 'supervisor') && (
+        {canLog && (
           <div style={card}>
-            <h4 style={{ color: t.accent, margin: '0 0 16px', fontSize: 14 }}>Raise Breakdown Ticket</h4>
+            <h4 style={{ color: t.accent, margin: '0 0 8px', fontSize: 14 }}>Quick Raise (legacy)</h4>
+            <p style={{ margin: '0 0 12px', fontSize: 12, color: t.textMuted }}>
+              Prefer clicking a machine above to pick a planned/unplanned reason. This form raises a generic unplanned Machine Breakdown ticket.
+            </p>
             <form onSubmit={raiseTicket} style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
               <select style={inp} value={form.station_id}
                 onChange={e => setForm(p => ({ ...p, station_id: e.target.value, machine_id: '' }))} required>
@@ -298,7 +749,6 @@ export default function Breakdown() {
               <input style={{ ...inp, flex: 1, minWidth: 200 }} placeholder="Describe the breakdown..."
                 value={form.description}
                 onChange={e => setForm(p => ({ ...p, description: e.target.value }))} required />
-              {msg && <span style={{ color: msg.startsWith('✓') ? '#10b981' : '#ef4444', fontSize: 13 }}>{msg}</span>}
               <button style={{ padding: '8px 20px', background: '#ef4444', color: '#fff', border: 'none',
                                borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: 13 }} type="submit">
                 Raise Ticket
@@ -307,12 +757,12 @@ export default function Breakdown() {
           </div>
         )}
 
-        {/* Tickets List */}
         <div style={card}>
           <h4 style={{ color: t.accent, margin: '0 0 16px', fontSize: 14 }}>All Tickets</h4>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
             {tickets.map(tk => {
               const cfg = STATUS_CONFIG[tk.status];
+              const typeColor = tk.downtime_type === 'planned' ? '#2482da' : '#ef4444';
               return (
                 <div key={tk.id} style={{ background: t.surface2, borderRadius: 8, padding: 14,
                                           borderLeft: `4px solid ${cfg?.color}` }}>
@@ -324,9 +774,21 @@ export default function Breakdown() {
                   <div style={{ color: t.accent, fontSize: 13, marginBottom: 4 }}>
                     Machine: {machines.find(m => m.id === tk.machine_id)?.name || tk.machine_id}
                   </div>
-                  {(tk.raised_by_username || tk.raised_by) && (
+                  {(tk.downtime_type || tk.downtime_reason) && (
+                    <div style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      fontSize: 11, fontWeight: 700, marginBottom: 6,
+                      padding: '2px 8px', borderRadius: 8,
+                      color: typeColor, background: typeColor + '18',
+                      border: `1px solid ${typeColor}44`,
+                    }}>
+                      {(tk.downtime_type || 'unplanned').toUpperCase()}
+                      {tk.downtime_reason ? ` · ${tk.downtime_reason}` : ''}
+                    </div>
+                  )}
+                  {raisedByLabel(tk) && (
                     <div style={{ color: t.textMuted, fontSize: 12, marginBottom: 4 }}>
-                      👤 Raised by: <b>{tk.raised_by_username || tk.raised_by}</b>
+                      👤 Raised by: <b>{raisedByLabel(tk)}</b>
                     </div>
                   )}
                   <div style={{ color: t.textMuted, fontSize: 13, marginBottom: 8 }}>{tk.description}</div>
@@ -347,7 +809,6 @@ export default function Breakdown() {
       </>)}
 
       {tab === 'log' && (() => {
-        // Thresholds
         const IDLE_LIMIT_MS      = 1   * 60 * 1000;
         const BREAKDOWN_LIMIT_MS = 90  * 60 * 1000;
         const ALARM_LIMIT_MS     = 30  * 60 * 1000;
@@ -360,7 +821,6 @@ export default function Breakdown() {
           setting_change: SC_LIMIT_MS,
         }[s] ?? null);
 
-        // Build rows with durations — keep original newest-first order
         const rows = statusLog.map((log, i) => {
           const from = new Date(log.changed_at);
           const to   = i === 0 ? new Date() : new Date(statusLog[i - 1].changed_at);
@@ -371,12 +831,9 @@ export default function Breakdown() {
           return { ...log, durationMs, effStatus, breached, isOngoing: i === 0 };
         });
 
-        // Breach counts per status
         const breachCounts = {};
         rows.forEach(r => { if (r.breached) breachCounts[r.status] = (breachCounts[r.status] || 0) + 1; });
 
-        // When a pill is clicked: show only that status sorted by duration desc
-        // When no filter: show original order
         const displayRows = logFilter
           ? [...rows]
               .filter(r => r.status === logFilter)
@@ -392,7 +849,6 @@ export default function Breakdown() {
 
         return (
           <div style={card}>
-            {/* Controls row */}
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
               <h4 style={{ color: t.accent, margin: 0, fontSize: 14 }}>Machine Status Log</h4>
               <select style={{ ...inp, width: 200 }} value={logMachineId}
@@ -404,7 +860,6 @@ export default function Breakdown() {
                                borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
                 onClick={() => fetchStatusLog(logMachineId)}>↻ Refresh</button>
 
-              {/* Clickable status filter pills */}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginLeft: 8 }}>
                 {summaryStatuses.map(s => {
                   const st  = STATUS_STYLE[s];
@@ -461,7 +916,6 @@ export default function Breakdown() {
                   <tbody>
                     {displayRows.map((log, i) => {
                       const st = STATUS_STYLE[log.effStatus] || STATUS_STYLE[log.status] || { color: t.textMuted, bg: 'transparent', label: log.status };
-                      // breached → red; normal highlight → status tint
                       const rowBg   = log.breached ? '#ef444418' : (['idle','ld/unld','breakdown','alarm','offline','setting_change'].includes(log.effStatus) ? st.bg : 'transparent');
                       const durColor = log.breached ? '#ef4444' : (log.isOngoing ? t.accent : (['idle','ld/unld','breakdown','alarm','offline','setting_change'].includes(log.effStatus) ? st.color : t.textMuted));
                       return (
@@ -526,6 +980,19 @@ export default function Breakdown() {
           </div>
         );
       })()}
+
+      {selectedMachine && (
+        <DowntimeModal
+          machine={selectedMachine}
+          users={users}
+          user={user}
+          theme={t}
+          busy={submitting}
+          msg={modalMsg}
+          onClose={() => { setSelectedMachine(null); setModalMsg(''); }}
+          onSubmit={logDowntime}
+        />
+      )}
     </div>
   );
 }
