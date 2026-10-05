@@ -195,21 +195,33 @@ def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = N
         result = ingest_samples(db, m.id, samples, source="nodered", write_history=True, sync_kpiv=True)
     if shot_pulse:
         try:
-            from .models import ImmShotEvent, now_ist
+            from .models import ImmMold, ImmShotEvent, now_ist
             from .tool_service import apply_shot_mold_usage
 
-            db.add(
-                ImmShotEvent(
-                    machine_id=m.id,
-                    recorded_at=now_ist(),
-                    mode=(shot_mode or "nodered")[:40],
-                    source="nodered",
-                    notes="EAP_Shot_Event from Node-RED",
-                )
+            active_mold = (
+                db.query(ImmMold)
+                .filter(ImmMold.machine_id == m.id, ImmMold.is_active == 1)
+                .first()
             )
-            mold_usage = apply_shot_mold_usage(db, m.id, 1, source="nodered")
+            n_shots = 1
+            try:
+                n_shots = max(1, int(float(shot_raw)))
+            except (TypeError, ValueError):
+                n_shots = 1
+            for _ in range(n_shots):
+                db.add(
+                    ImmShotEvent(
+                        machine_id=m.id,
+                        recorded_at=now_ist(),
+                        mode=(shot_mode or "nodered")[:40],
+                        source="nodered",
+                        notes="EAP_Shot_Event from Node-RED",
+                        mold_id=int(active_mold.id) if active_mold else None,
+                    )
+                )
+            mold_usage = apply_shot_mold_usage(db, m.id, n_shots, source="nodered")
             db.commit()
-            result["shots_detected"] = int(result.get("shots_detected") or 0) + 1
+            result["shots_detected"] = int(result.get("shots_detected") or 0) + n_shots
             result["shot_event"] = True
             if mold_usage:
                 result["mold_usage"] = mold_usage

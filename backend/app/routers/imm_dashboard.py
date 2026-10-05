@@ -1048,7 +1048,7 @@ def _batch_shift_production(db: Session, machine_ids: List[int]) -> Dict[int, di
     - Mold / plan changes within the shift accumulate (sum of plan actuals, or
       live shots × cavity when a single active plan).
     """
-    from ..imm_shot_counter import batch_count_shot_events, count_machine_shots
+    from ..imm_shot_counter import batch_count_shot_events, count_machine_shots, shift_shots_and_parts
     from ..models import OEEEntry
     from .oee import _running_cavity_from_plan
 
@@ -1104,16 +1104,31 @@ def _batch_shift_production(db: Session, machine_ids: List[int]) -> Dict[int, di
         running_cavity = _running_cavity_from_plan(primary, default=1) if primary else 1
         shift_target = sum(int(p.planned_qty or 0) for p in mplans)
 
-        # Prefer event batch; fall back to full count (events+sample replay) per machine
-        shot_count = int(event_shots.get(mid) or 0)
+        # Prefer mold-aware parts (mid-shift mold change keeps shift total, new mold period separate)
+        try:
+            shot_count, live_act, mold_period_shots = shift_shots_and_parts(
+                db, mid, shift_start, effective_end, fallback_cavity=running_cavity,
+            )
+        except Exception:
+            shot_count = int(event_shots.get(mid) or 0)
+            if shot_count <= 0:
+                try:
+                    shot_count = int(count_machine_shots(db, mid, shift_start, effective_end) or 0)
+                except Exception:
+                    shot_count = 0
+            live_act = int(shot_count) * int(running_cavity or 1)
+            mold_period_shots = shot_count
+
         if shot_count <= 0:
+            # Fallback sample replay when no ImmShotEvent rows yet
             try:
                 shot_count = int(count_machine_shots(db, mid, shift_start, effective_end) or 0)
+                live_act = int(shot_count) * int(running_cavity or 1)
+                mold_period_shots = shot_count
             except Exception:
-                shot_count = 0
+                pass
 
-        live_act = int(shot_count) * int(running_cavity or 1)
-        # Cumulative across mold/plan changes in this shift
+        # Cumulative across mold/plan changes in this shift (plan actuals + live)
         plan_actual_sum = sum(int(p.actual_qty or 0) for p in mplans)
         if len(mplans) > 1 and plan_actual_sum > 0:
             shift_act = max(live_act, plan_actual_sum)
@@ -1135,6 +1150,7 @@ def _batch_shift_production(db: Session, machine_ids: List[int]) -> Dict[int, di
             "shift_start": shift_start.isoformat(),
             "shift_end": shift_end.isoformat(),
             "shot_count": int(shot_count),
+            "mold_period_shots": int(mold_period_shots),
             "running_cavity": int(running_cavity or 1),
             "shift_prod_target": int(shift_target),
             "shift_act_prod": int(shift_act),
@@ -1154,6 +1170,7 @@ def _equipment_shift_production(db: Session, machine_id: int) -> dict:
         "shift_name": None,
         "entry_date": None,
         "shot_count": 0,
+        "mold_period_shots": 0,
         "running_cavity": 1,
         "shift_prod_target": 0,
         "shift_act_prod": 0,

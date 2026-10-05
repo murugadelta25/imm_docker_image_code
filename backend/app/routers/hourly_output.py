@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from datetime import date, datetime, timedelta
 from typing import Optional
 import json
@@ -1180,9 +1181,9 @@ def sync_plan_actuals_from_status_logs(
             and s['start'] >= shift_start
             and s['start'] < effective_end
         ]
-        from ..imm_shot_counter import count_machine_shots
-        shot_count = count_machine_shots(db, mid, shift_start, effective_end)
-        # IMM: Actual parts = shot counts × running cavity (from plan mold snapshot)
+        from ..imm_shot_counter import count_machine_shots, shift_shots_and_parts
+        # IMM: Actual parts = shift shots × cavity (per mold when mold_id tagged on shots).
+        # Mid-shift mold change: prior mold production stays in shift total; new mold adds on.
         running_cavity = 1
         raw_details = getattr(target, "mold_details_json", None)
         if raw_details:
@@ -1194,7 +1195,77 @@ def sync_plan_actuals_from_status_logs(
                     running_cavity = max(1, int(cav))
             except (TypeError, ValueError, Exception):
                 running_cavity = 1
-        computed = int(shot_count or 0) * int(running_cavity)
+
+        if len(group) > 1:
+            # Attribute shots to each plan by mold_no match; leftover / untagged → primary (target)
+            from ..models import ImmMold
+            mold_rows = {
+                (m.mold_no or "").strip().upper(): m
+                for m in db.query(ImmMold).filter(ImmMold.machine_id == mid).all()
+            }
+            attributed_mold_ids = set()
+            for p in group:
+                p_cav = 1
+                p_mold_no = ""
+                raw = getattr(p, "mold_details_json", None)
+                if raw:
+                    try:
+                        import json as _json
+                        det = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                        if det.get("running_cavity") not in (None, ""):
+                            p_cav = max(1, int(det["running_cavity"]))
+                        p_mold_no = str(det.get("mold_no") or det.get("mold_name") or "").strip().upper()
+                    except Exception:
+                        pass
+                imm = mold_rows.get(p_mold_no) if p_mold_no else None
+                if imm:
+                    attributed_mold_ids.add(imm.id)
+                    from ..models import ImmShotEvent
+                    n = (
+                        db.query(func.count(ImmShotEvent.id))
+                        .filter(
+                            ImmShotEvent.machine_id == mid,
+                            ImmShotEvent.mold_id == imm.id,
+                            ImmShotEvent.recorded_at >= shift_start,
+                            ImmShotEvent.recorded_at < effective_end,
+                        )
+                        .scalar()
+                    )
+                    computed = int(n or 0) * int(p_cav)
+                elif p.id == target.id:
+                    shot_count, parts, _ = shift_shots_and_parts(
+                        db, mid, shift_start, effective_end, fallback_cavity=running_cavity,
+                    )
+                    # Subtract parts already attributed to other molds when possible
+                    computed = int(parts)
+                else:
+                    computed = int(p.actual_qty or 0)
+
+                new_actual = max(int(p.actual_qty or 0), int(computed or 0))
+                if new_actual != int(p.actual_qty or 0):
+                    p.actual_qty = new_actual
+                    p.updated_at = _now
+                    updated += 1
+                    if p.work_order_id:
+                        touched_wo_ids.add(p.work_order_id)
+                    if (
+                        p.status == 'running'
+                        and p.planned_qty
+                        and new_actual >= p.planned_qty
+                    ):
+                        p.status = 'completed'
+            continue
+
+        try:
+            shot_count, computed, _ = shift_shots_and_parts(
+                db, mid, shift_start, effective_end, fallback_cavity=running_cavity,
+            )
+            if shot_count <= 0:
+                shot_count = count_machine_shots(db, mid, shift_start, effective_end)
+                computed = int(shot_count or 0) * int(running_cavity)
+        except Exception:
+            shot_count = count_machine_shots(db, mid, shift_start, effective_end)
+            computed = int(shot_count or 0) * int(running_cavity)
 
         new_actual = max(int(target.actual_qty or 0), int(computed or 0))
         if new_actual != int(target.actual_qty or 0):

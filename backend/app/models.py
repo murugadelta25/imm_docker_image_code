@@ -968,6 +968,8 @@ class ImmMold(Base):
     cycles_after_maintenance = Column(Integer, default=0)
     maintenance_limit = Column(Integer, default=25000)
     is_active = Column(Integer, default=1)  # 1 = currently mounted
+    # When this mold was last activated on the machine (period shot counter baseline).
+    mounted_at = Column(DateTime, nullable=True)
     notes = Column(String(255))
     created_at = Column(DateTime, default=now_ist)
     updated_at = Column(DateTime, default=now_ist, onupdate=now_ist)
@@ -1075,11 +1077,12 @@ class ImmShotEvent(Base):
     id = Column(Integer, primary_key=True, index=True)
     machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
     recorded_at = Column(DateTime, default=now_ist, index=True)
-    # opcua_cycle = Injection_Time → Charging_Time → Production_Count
-    # status_tags = Injection_Status true → Refilling_Status true (IMM17/18)
+    # opcua_good_count | status_tags | …
     mode = Column(String(40), default="opcua_cycle")
     source = Column(String(40), default="nodered")
     notes = Column(String(255))
+    # Active ImmMold at shot time (for mid-shift mold change + mold history).
+    mold_id = Column(Integer, ForeignKey("imm_molds.id"), nullable=True, index=True)
 
 
 class ImmShotFsm(Base):
@@ -1223,6 +1226,9 @@ def ensure_imm_schema(bind=None):
             if not inspector.has_table(name):
                 table.create(bind=bind)
                 print(f"[OK] Created table {name}")
+        from sqlalchemy import text
+        _add_column_if_missing(bind, text, "imm_molds", "mounted_at", "mounted_at DATETIME NULL")
+        _add_column_if_missing(bind, text, "imm_shot_events", "mold_id", "mold_id INT NULL")
         return True
     except Exception as exc:
         print(f"[WARN] ensure_imm_schema failed: {exc}")

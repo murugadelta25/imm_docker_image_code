@@ -226,6 +226,7 @@ def _ensure_defaults(db: Session, machine_id: int):
             cycles_after_maintenance=0,
             maintenance_limit=25000,
             is_active=1,
+            mounted_at=now_ist(),
         )
         db.add(mold)
 
@@ -553,6 +554,7 @@ def _serialize_mold(mold: ImmMold, master_map: Optional[dict] = None) -> dict:
         "maintenance_limit": mold.maintenance_limit,
         "maintenance": maint,
         "is_active": bool(mold.is_active),
+        "mounted_at": mold.mounted_at.isoformat() if getattr(mold, "mounted_at", None) else None,
         "notes": mold.notes,
     }
     if master_map is not None:
@@ -793,6 +795,7 @@ def create_mold(
         maintenance_limit=data.maintenance_limit,
         notes=data.notes,
         is_active=1 if data.activate else 0,
+        mounted_at=now_ist() if data.activate else None,
     )
     db.add(mold)
     db.commit()
@@ -861,7 +864,8 @@ def activate_mold(
         {"is_active": 0}
     )
     mold.is_active = 1
-    # Align Uses/Max with Mold Management master (keep the higher life used)
+    mold.mounted_at = now_ist()
+    # Align Uses/Max with Mold Management master (keep the higher life used — never reset to 0)
     from ..tool_service import find_tool_by_mold_no
 
     tool = find_tool_by_mold_no(db, mold.mold_no)

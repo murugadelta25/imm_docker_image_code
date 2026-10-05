@@ -335,8 +335,8 @@ const prev = store[storeKey] || {};
 const prevParams = prev.parameters || {};
 
 // ── Shot detection in Node-RED (keeps EAP backend light) ──
-// OPCUA: Injection_Time → Charging_Time → Production_Count (separate msgs)
-// IMM17/18: Injection_Status true → Refilling_Status true (separate msgs)
+// OPCUA IMM_07..11: Total_Good_Count increase → shot(s); backend also counts on ingest
+// IMM17/18: inj→refill rise OR motor on + refill pulse (rise then fall)
 const truthy = (v) => {
   const s = String(v == null ? '' : v).trim().toLowerCase();
   return s === 'true' || s === '1' || s === 'on' || s === 'yes';
@@ -354,49 +354,23 @@ if (fsm.state !== 'idle' && (Date.now() - Number(fsm.updated_at || 0)) > SHOT_TI
 }
 
 let shot = 0;
-const opcuaTouch =
-  changed('Actual_Injection_Time') ||
-  changed('Actual_Charging_Time') ||
-  changed('Actual_Production_Count');
-const hasOpcuaContext =
-  opcuaTouch ||
-  prevParams.Actual_Injection_Time != null ||
-  parameters.Actual_Injection_Time != null ||
-  prevParams.Actual_Production_Count != null ||
-  parameters.Actual_Production_Count != null;
-
-if (!isEnergyLabel && hasOpcuaContext && opcuaTouch) {
-  const inj = changed('Actual_Injection_Time');
-  const chg = changed('Actual_Charging_Time');
-  const prod = changed('Actual_Production_Count');
-  // Injection + Charging in same msg → remember injection only
-  if (inj && chg) {
-    fsm = { state: 'saw_injection', mode: 'opcua_cycle', updated_at: Date.now() };
-  } else if (inj) {
-    fsm = { state: 'saw_injection', mode: 'opcua_cycle', updated_at: Date.now() };
-  } else if (chg) {
-    if (fsm.state === 'saw_injection') {
-      fsm = { state: 'saw_charge', mode: 'opcua_cycle', updated_at: Date.now() };
-    } else {
-      fsm = { state: 'idle', mode: 'opcua_cycle', updated_at: Date.now() };
-    }
-  } else if (prod) {
-    if (fsm.state === 'saw_charge') {
-      shot = 1;
-      fsm = { state: 'idle', mode: 'opcua_cycle', updated_at: Date.now() };
-    } else {
-      fsm = { state: 'idle', mode: 'opcua_cycle', updated_at: Date.now() };
-    }
-  }
-} else if (!isEnergyLabel && (changed('Injection_Status') || changed('Refilling_Status'))) {
+// OPC UA good-count shots are recorded by the EAP backend on ingest (avoid double count).
+// Node-RED only emits EAP_Shot_Event for IMM17/18 status-tag sequences.
+if (!isEnergyLabel && (changed('Injection_Status') || changed('Refilling_Status') || changed('Motor_Status'))) {
+  const motorOn = truthy(parameters.Motor_Status);
   const injRise = changed('Injection_Status') && truthy(parameters.Injection_Status) && !truthy(prevParams.Injection_Status);
   const refRise = changed('Refilling_Status') && truthy(parameters.Refilling_Status) && !truthy(prevParams.Refilling_Status);
-  // Both rising together → remember injection only (must be sequential msgs)
+  const refFall = changed('Refilling_Status') && !truthy(parameters.Refilling_Status) && truthy(prevParams.Refilling_Status);
   if (injRise && refRise) {
     fsm = { state: 'saw_injection', mode: 'status_tags', updated_at: Date.now() };
   } else if (injRise) {
     fsm = { state: 'saw_injection', mode: 'status_tags', updated_at: Date.now() };
   } else if (refRise && fsm.state === 'saw_injection') {
+    shot = 1;
+    fsm = { state: 'idle', mode: 'status_tags', updated_at: Date.now() };
+  } else if (refRise && motorOn) {
+    fsm = { state: 'saw_refill_high', mode: 'status_tags', updated_at: Date.now() };
+  } else if (refFall && fsm.state === 'saw_refill_high') {
     shot = 1;
     fsm = { state: 'idle', mode: 'status_tags', updated_at: Date.now() };
   }
@@ -421,6 +395,14 @@ if (shot) {
     fill: 'green',
     shape: 'dot',
     text: 'SHOT ' + entry.machine_name + (entry.machine_id ? (' #' + entry.machine_id) : '')
+  });
+} else if (changed('Total_Good_Count')) {
+  // IMM_07..11: push immediately so EAP can count shots from good-count delta
+  msg.force_eap_push = true;
+  node.status({
+    fill: 'green',
+    shape: 'dot',
+    text: 'GOOD ' + entry.machine_name + (entry.machine_id ? (' #' + entry.machine_id) : '')
   });
 } else {
   node.status({
@@ -632,8 +614,8 @@ def main():
                 "Includes IMM_07..IMM_11 plus **PLC_Plastech** (IMM17 / IMM18 status + plant energy meter).\n\n"
                 "**Shot counting (Node-RED):** Normalize & store runs a per-machine FSM and pushes "
                 "`EAP_Shot_Event=1` when a shot completes — EAP only records the event (light).\n"
-                "- OPCUA: Actual_Injection_Time → Actual_Charging_Time → Actual_Production_Count (separate msgs)\n"
-                "- IMM17/18: Injection_Status true → Refilling_Status true (separate msgs)\n\n"
+                "- OPCUA IMM_07..11: Total_Good_Count increase → shot(s); actual = shots × running cavity\n"
+                "- IMM17/18: inj→refill rise, or motor on + refilling pulse (rise→fall)\n\n"
                 "## Configure\n"
                 "1. Inject **1 Set EAP webhook URL**\n"
                 "2. Inject **2 Set machine fleet map** (IMM17→3, IMM18→4)\n"

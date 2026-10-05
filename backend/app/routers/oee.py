@@ -675,12 +675,19 @@ def _compute_realtime_oee_for_date(
                     primary_ct = ct
                     break
 
-            # Shot count from OPC UA / status-tag cycle sequences
-            from ..imm_shot_counter import count_machine_shots
-            shot_count = count_machine_shots(db, mid, shift_start, effective_end)
+            # Shot count from good-count / status-tag events (shift window starts at 0)
+            from ..imm_shot_counter import count_machine_shots, shift_shots_and_parts
             running_cavity = _running_cavity_from_plan(primary_plan, default=1)
-            # Total units produced = shots × actual running cavity
-            actual_qty = int(shot_count) * int(running_cavity)
+            try:
+                shot_count, actual_qty, _mold_period = shift_shots_and_parts(
+                    db, mid, shift_start, effective_end, fallback_cavity=running_cavity,
+                )
+                if shot_count <= 0:
+                    shot_count = count_machine_shots(db, mid, shift_start, effective_end)
+                    actual_qty = int(shot_count) * int(running_cavity)
+            except Exception:
+                shot_count = count_machine_shots(db, mid, shift_start, effective_end)
+                actual_qty = int(shot_count) * int(running_cavity)
 
             total_planned = sum(p.planned_qty or 0 for p in mplans)
             # Theoretical capacity over planned production time (for Possible qty display)

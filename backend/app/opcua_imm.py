@@ -357,9 +357,23 @@ def ingest_samples(
                 kpiv_written += 1
         accepted += 1
 
-    # Shot sequence detection is handled in Node-RED (EAP_Shot_Event).
-    # Optional backend FSM remains available via IMM_BACKEND_SHOT_FSM=1.
+    # Shot sequence detection is handled in Node-RED (EAP_Shot_Event) for IMM17/18.
+    # OPC UA IMM_07..11: always count from Total_Good_Count increases (not inj→charge FSM).
+    # Optional backend status-tag FSM via IMM_BACKEND_SHOT_FSM=1.
     shots_detected = 0
+    if shot_changes:
+        try:
+            from .imm_shot_counter import apply_opcua_good_count_shots
+
+            shots_detected = int(
+                apply_opcua_good_count_shots(
+                    db, machine_id, shot_changes, now=now, source=source, commit=False,
+                )
+                or 0
+            )
+        except Exception:
+            shots_detected = 0
+
     backend_fsm = str(os.getenv("IMM_BACKEND_SHOT_FSM", "0")).strip().lower() in (
         "1", "true", "yes", "on",
     )
@@ -367,11 +381,32 @@ def ingest_samples(
         try:
             from .imm_shot_counter import apply_shot_changes
 
-            shots_detected = apply_shot_changes(
-                db, machine_id, shot_changes, now=now, source=source, commit=False,
+            shots_detected += int(
+                apply_shot_changes(
+                    db, machine_id, shot_changes, now=now, source=source, commit=False,
+                )
+                or 0
             )
         except Exception:
-            shots_detected = 0
+            pass
+
+    plc_cycle_time_sec: Optional[float] = None
+    if shot_changes:
+        try:
+            from .imm_shot_counter import apply_plc_refilling_cycle_time
+
+            mach = db.query(Machine).filter(Machine.id == machine_id).first()
+            plc_cycle_time_sec = apply_plc_refilling_cycle_time(
+                db,
+                machine_id,
+                shot_changes,
+                now=now,
+                machine_name=mach.name if mach else None,
+                write_history=write_history,
+                source=source,
+            )
+        except Exception:
+            plc_cycle_time_sec = None
 
     db.commit()
 
@@ -381,12 +416,15 @@ def ingest_samples(
     except Exception:
         pass
 
-    return {
+    out = {
         "accepted": accepted,
         "kpiv_written": kpiv_written,
         "shots_detected": shots_detected,
         "recorded_at": now.isoformat(),
     }
+    if plc_cycle_time_sec is not None:
+        out["plc_cycle_time_sec"] = plc_cycle_time_sec
+    return out
 
 
 def sync_imm_status_log(db: Session, machine_id: int, source: str = "imm_opcua") -> Optional[str]:
@@ -627,6 +665,30 @@ def _cycle_activity_recent(opcua: dict, max_age_sec: int = IMM_CYCLE_ACTIVITY_SE
     return False
 
 
+def _plc_status_cycle_activity_recent(
+    opcua: dict,
+    max_age_sec: int = IMM_CYCLE_ACTIVITY_SEC,
+) -> bool:
+    """True when Injection_Status or Refilling_Status is ON and recently updated.
+
+    Plastech IMM17/18 stream status tags (not CT values). A true pulse on either
+    tag within the activity window means the machine is cycling.
+    """
+    now = now_ist().replace(tzinfo=None)
+    for key in ("Injection_Status", "Refilling_Status"):
+        if key not in opcua:
+            continue
+        if not _opcua_flag(opcua, key):
+            continue
+        ts = _highlight_recorded_at(opcua.get(key) or {})
+        if ts is None:
+            # Value is true but no timestamp — treat as live activity
+            return True
+        if (now - ts).total_seconds() <= max_age_sec:
+            return True
+    return False
+
+
 def eap_imm_status_from_opcua_highlights(
     opcua: dict,
     *,
@@ -641,8 +703,9 @@ def eap_imm_status_from_opcua_highlights(
     Categories:
       plc_status (IMM17/IMM18):
         Motor/Heater not updated for > one shift → offline
-        Motor ON + Heater ON → available (running if Injection recently true)
-        Motor/Heater mixed → idle; both OFF → stop
+        Motor ON + recent Injection/Refilling → running
+        Motor ON (heater optional — Plastech often has heater OFF while producing) → available
+        Motor OFF + Heater ON → idle; both OFF → stop
       opcua (IMM_07..IMM_11):
         Motor ON + Heater ON + recent Charging/Injection time change → running
         Motor ON + Heater ON (powered, not cycling)                 → available
@@ -664,18 +727,13 @@ def eap_imm_status_from_opcua_highlights(
             return "offline"
         motor = _opcua_flag(opcua, "Motor_Status")
         heater = _opcua_flag(opcua, "Heater_Status")
-        if motor and heater:
-            # PLC stream has no reliable CT tags — Injection_Status true ≈ cycling
-            inj = opcua.get("Injection_Status")
-            if inj is not None:
-                inj_ts = _highlight_recorded_at(inj)
-                inj_on = _opcua_flag(opcua, "Injection_Status")
-                if inj_on and inj_ts is not None:
-                    age = (now_ist().replace(tzinfo=None) - inj_ts).total_seconds()
-                    if age <= IMM_CYCLE_ACTIVITY_SEC:
-                        return "running"
+        # Plastech: Motor is the production-power gate; Heater may stay OFF while running.
+        # Requiring Motor+Heater previously forced IMM17 to Idle whenever heater was false.
+        if motor:
+            if _plc_status_cycle_activity_recent(opcua):
+                return "running"
             return "available"
-        if motor or heater:
+        if heater:
             return "idle"
         return "stop"
 
