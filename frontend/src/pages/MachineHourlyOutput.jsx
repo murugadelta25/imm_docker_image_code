@@ -41,6 +41,8 @@ function liveEntryDateForShift(shift) {
 const STATE_ROWS = [
   { key: 'running', label: 'Running' },
   { key: 'expected', label: 'Possible output' },
+  { key: 'shot_weight_g', label: 'Shot weight (g)' },
+  { key: 'req_rm_kg', label: 'Req RM (kg)' },
   { key: 'ar', label: 'AR', pct: true },
   { key: 'pr', label: 'PR', pct: true },
   { key: 'qr', label: 'QR', pct: true },
@@ -111,6 +113,16 @@ function buildPalette(t, isDark) {
       rowBg: isDark ? '#312e8122' : '#ede9fe',
       rowLabel: isDark ? '#a78bfa' : '#6d28d9',
       border: isDark ? '#5b21b6' : '#c4b5fd',
+    },
+    shot_weight_g: {
+      rowBg: isDark ? '#134e4a33' : '#ccfbf1',
+      rowLabel: isDark ? '#5eead4' : '#0f766e',
+      border: isDark ? '#0d9488' : '#5eead4',
+    },
+    req_rm_kg: {
+      rowBg: isDark ? '#42200633' : '#ffedd5',
+      rowLabel: isDark ? '#fdba74' : '#c2410c',
+      border: isDark ? '#ea580c' : '#fdba74',
     },
     perfRed: {
       background: isDark ? '#7f1d1dcc' : '#fecaca',
@@ -256,14 +268,20 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
   const pctKeys = new Set(['ar', 'pr', 'qr', 'oee']);
   const displayValues = (rowKey) => {
     const raw = states?.[rowKey] || [];
-    if (pctKeys.has(rowKey) || incremental || rowKey === 'expected') return raw;
+    if (pctKeys.has(rowKey) || incremental || rowKey === 'expected' || rowKey === 'shot_weight_g' || rowKey === 'req_rm_kg') return raw;
     if (rowKey === 'running') return runningVals;
     return incrementalHourly(raw);
   };
 
-  const formatCell = (val, isPct) => {
+  const formatCell = (val, isPct, rowKey) => {
     if (val == null || val === 0) return 0;
     if (isPct) return typeof val === 'number' ? Math.round(val) : val;
+    if (rowKey === 'req_rm_kg' && typeof val === 'number') {
+      return Number(val.toFixed(3));
+    }
+    if (typeof val === 'number' && !Number.isInteger(val)) {
+      return Number(val.toFixed(1));
+    }
     return val;
   };
 
@@ -314,15 +332,20 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
                   whiteSpace: 'nowrap', width: labelW, minWidth: labelW, maxWidth: labelW,
                 }}>{row.label}{isPct ? '%' : ''}</td>
                 {values.map((val, i) => {
-                  const displayVal = incremental && !isPct && row.key !== 'expected' && !(expected[i] > 0)
-                    ? 0
-                    : formatCell(val, isPct);
+                  // Keep actual running / shot-weight cells even when possible (CT) is still 0
+                  const hideEmptyInc = incremental && !isPct
+                    && row.key !== 'expected'
+                    && row.key !== 'shot_weight_g'
+                    && row.key !== 'req_rm_kg'
+                    && row.key !== 'running'
+                    && !(expected[i] > 0);
+                  const displayVal = hideEmptyInc ? 0 : formatCell(val, isPct, row.key);
                   let cellStyle = { ...palette.cellNeutral, background: rowPalette.rowBg, color: t.text };
                   if (row.key === 'running') {
                     const exp = expected[i] || 0;
                     const ratio = exp > 0 ? runningVals[i] / exp : null;
                     cellStyle = { ...perfStyle(ratio, palette), fontSize: cellFont };
-                  } else if (row.key === 'expected') {
+                  } else if (row.key === 'expected' || row.key === 'shot_weight_g' || row.key === 'req_rm_kg') {
                     cellStyle = {
                       background: rowPalette.rowBg,
                       color: rowPalette.rowLabel,
@@ -345,7 +368,7 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
                 }}>
                   {isPct
                     ? `${typeof (shiftTotals?.[row.key]) === 'number' ? Math.round(shiftTotals[row.key]) : (shiftTotals?.[row.key] ?? 0)}%`
-                    : (shiftTotals?.[row.key] ?? 0)}
+                    : formatCell(shiftTotals?.[row.key] ?? 0, false, row.key)}
                 </td>
               </tr>
             );
@@ -356,6 +379,27 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
   );
 }
 
+function formatPlanQty(qty) {
+  if (qty == null || qty === '' || Number(qty) <= 0) return '—';
+  return `${Number(qty)} nos.`;
+}
+
+function formatShotWeight(w) {
+  if (w == null || w === '' || Number.isNaN(Number(w))) return '—';
+  const n = Number(w);
+  return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(2)));
+}
+
+function cardDisplayName(machine) {
+  return (
+    machine.display_name
+    || machine.part_name
+    || machine.part_no
+    || machine.mold_name
+    || ''
+  ).trim();
+}
+
 function VariantSection({ variantBlock, colorIndex, slots, palette, layout, t, isLast, isLive, machineStatus }) {
   const statFont = layout.ultra ? 9 : layout.compact ? 10 : 11;
   const statValueFont = layout.ultra ? 11 : layout.compact ? 12 : 13;
@@ -363,6 +407,8 @@ function VariantSection({ variantBlock, colorIndex, slots, palette, layout, t, i
   const accent = VARIANT_COLORS[colorIndex % VARIANT_COLORS.length];
   const ctText = formatCtLabel(variantBlock.cycle_time_display, variantBlock.cycle_time);
   const planQty = variantBlock.planned_qty || 0;
+  const runCav = variantBlock.running_cavity != null ? variantBlock.running_cavity : 1;
+  const shotW = variantBlock.std_shot_weight;
   const isCurrent = variantBlock.is_current;
 
   return (
@@ -389,10 +435,18 @@ function VariantSection({ variantBlock, colorIndex, slots, palette, layout, t, i
         }}>
           <div>
             CT in secs = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>{ctText}</strong>
+            <span style={{ marginLeft: 8 }}>
+              Cav = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>{runCav}</strong>
+            </span>
           </div>
           <div>
             Plan Qty = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>
-              {planQty > 0 ? `${planQty} nos.` : '—'}
+              {formatPlanQty(planQty)}
+            </strong>
+          </div>
+          <div>
+            Std Shot Wt = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>
+              {formatShotWeight(shotW)}{shotW != null ? ' g' : ''}
             </strong>
           </div>
         </div>
@@ -432,14 +486,19 @@ function MachineCard({ machine, slots, palette, layout, t, isLive, shiftLabel })
   const nameFont = layout.ultra ? 14 : layout.compact ? 16 : 18;
   const statFont = layout.ultra ? 10 : layout.compact ? 11 : 12;
   const statValueFont = layout.ultra ? 12 : layout.compact ? 13 : 14;
+  const fallbackName = cardDisplayName(machine);
   const variants = (machine.model_variants?.length
     ? machine.model_variants
-    : (machine.model_variant?.trim() ? [machine.model_variant.trim()] : []));
+    : (machine.model_variant?.trim()
+      ? [machine.model_variant.trim()]
+      : (fallbackName ? [fallbackName] : [])));
   const breakdown = machine.variant_breakdown?.length > 1
     ? machine.variant_breakdown
     : null;
   const ctText = formatMachineCt(machine);
   const planQty = machine.planned_qty || 0;
+  const runCav = machine.running_cavity != null ? machine.running_cavity : 1;
+  const shotW = machine.std_shot_weight;
 
   return (
     <div
@@ -480,7 +539,7 @@ function MachineCard({ machine, slots, palette, layout, t, isLive, shiftLabel })
             <div style={{ fontSize: statFont, color: t.textDim, textAlign: 'right' }}>
               <div>
                 Plan Qty = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>
-                  {planQty > 0 ? `${planQty} nos.` : '—'}
+                  {formatPlanQty(planQty)}
                 </strong>
               </div>
               <div style={{ marginTop: 2, color: t.textMuted }}>
@@ -550,8 +609,16 @@ function MachineCard({ machine, slots, palette, layout, t, isLive, shiftLabel })
                 CT in secs = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>{ctText}</strong>
               </div>
               <div style={{ marginTop: 2 }}>
+                Running Cav = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>{runCav}</strong>
+              </div>
+              <div style={{ marginTop: 2 }}>
                 Plan Qty = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>
-                  {planQty > 0 ? `${planQty} nos.` : '—'}
+                  {formatPlanQty(planQty)}
+                </strong>
+              </div>
+              <div style={{ marginTop: 2 }}>
+                Std Shot Wt = <strong style={{ color: t.text, fontSize: statValueFont, fontWeight: 800 }}>
+                  {formatShotWeight(shotW)}{shotW != null ? ' g' : ''}
                 </strong>
               </div>
             </div>
@@ -627,6 +694,8 @@ function PerformanceLegend({ palette, t }) {
       {[
         ['Running', palette.running.rowLabel],
         ['Possible output', palette.expected.rowLabel],
+        ['Shot weight (g)', palette.shot_weight_g.rowLabel],
+        ['Req RM (kg)', palette.req_rm_kg.rowLabel],
         ['AR', palette.ar.rowLabel],
         ['PR', palette.pr.rowLabel],
         ['QR', palette.qr.rowLabel],

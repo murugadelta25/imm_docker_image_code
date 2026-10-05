@@ -1203,6 +1203,22 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
             return float(v["value_num"])
         return default
 
+    def num_or_none(key: str):
+        """Return live tag numeric value, or None when the tag is absent."""
+        v = opcua.get(key) or {}
+        if v.get("value_num") is not None:
+            try:
+                return float(v["value_num"])
+            except (TypeError, ValueError):
+                pass
+        text = v.get("value_text")
+        if text is not None and str(text).strip() != "":
+            try:
+                return float(str(text).replace(",", "").strip())
+            except (TypeError, ValueError):
+                return None
+        return None
+
     def text(key: str, default: str = "—") -> str:
         v = opcua.get(key) or {}
         return str(v.get("value_text") or v.get("value_num") or default)
@@ -1214,12 +1230,9 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
     cavity = float(shift_prod.get("running_cavity") or 0) or num("Actual_Cavity_No") or 0.0
     uph = round(3600.0 / cycle, 1) if cycle > 0 else 0.0
 
-    lifetime_target = num("Production_Target_Count")
-    # Controllers often publish unset targets as ~1e8 — hide those as —
-    if lifetime_target >= 1_000_000:
-        lifetime_target_disp = None
-    else:
-        lifetime_target_disp = int(lifetime_target) if lifetime_target else None
+    # Prod Target Count = live machine tag Production_Target_Count (no placeholder filter)
+    lifetime_target = num_or_none("Production_Target_Count")
+    lifetime_target_disp = int(round(lifetime_target)) if lifetime_target is not None else None
     lifetime_good = int(num("Total_Good_Count") or 0)
     lifetime_bad = int(num("Total_Bad_Count") or 0)
 

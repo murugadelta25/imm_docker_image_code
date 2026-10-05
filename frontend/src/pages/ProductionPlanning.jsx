@@ -7,7 +7,7 @@ import PageHeader from '../components/PageHeader';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
 import { useConfig, getCurrentShift } from '../context/ConfigContext';
-import { parseCtSeconds, sumCt, formatCtSeconds, isValidDecimalInput } from '../utils/cycleTime';
+import { parseCtSeconds, formatCtSeconds, isValidDecimalInput } from '../utils/cycleTime';
 import { computePlanningCapacityHints } from '../utils/hourlyOutput';
 import { partToPlanningVariant, planModelVariant } from '../utils/partVariant';
 import { DRAFT_KEYS } from '../utils/formPersistence';
@@ -77,7 +77,7 @@ const INIT_FORM = {
   mold_id: '',
   model_variant: '',
   process_time: '',
-  loading_unloading: 10, // mold change time (sec)
+  loading_unloading: 0, // kept for API; CT uses standard cycle time only
   planned_qty: '', priority: 1,
   plan_type: 'scheduled', plan_mode: 'single', notes: '',
   use_machine: false,  // false = station mode, true = individual machine mode
@@ -99,7 +99,6 @@ const INIT_FORM = {
   cavity_id: '',
   cavity_change: false,
   target_per_shift: '',
-  mold_change_time: '10',
   mold_status: '',
   assigned_by: '',
 };
@@ -357,8 +356,7 @@ export default function ProductionPlanning() {
       target_per_shift: mold.target_per_shift != null ? String(mold.target_per_shift) : '',
       mold_status: mold.tool_status || '',
       process_time: cycle,
-      loading_unloading: p.mold_change_time || p.loading_unloading || '10',
-      mold_change_time: p.mold_change_time || String(p.loading_unloading || 10),
+      loading_unloading: 0,
       assigned_by: p.assigned_by || assigned,
       planned_qty: (!p.planned_qty && mold.target_per_shift != null)
         ? String(mold.target_per_shift)
@@ -416,20 +414,21 @@ export default function ProductionPlanning() {
   );
 
   const shiftCapacityHints = useMemo(() => {
-    const ctSec = sumCt(form.process_time, form.mold_change_time || form.loading_unloading);
+    const ctSec = parseCtSeconds(form.process_time);
+    const runCav = form.running_cavity !== '' && form.running_cavity != null
+      ? Number(form.running_cavity)
+      : 1;
     return computePlanningCapacityHints({
       ctSec,
       shifts: selectedShifts,
       breaks: config.breaks || {},
       unplannedQty: selectedWorkOrder?.unplanned_qty ?? null,
       slotCount: planCapacity.slotCount,
+      runningCavity: Number.isFinite(runCav) && runCav > 0 ? runCav : 1,
     });
-  }, [form.process_time, form.mold_change_time, form.loading_unloading, selectedShifts, config.breaks, selectedWorkOrder, planCapacity.slotCount]);
+  }, [form.process_time, form.running_cavity, selectedShifts, config.breaks, selectedWorkOrder, planCapacity.slotCount]);
 
   const buildPlanPayload = useCallback((shifts, { toolAck = false } = {}) => {
-    const moldChange = form.mold_change_time !== '' && form.mold_change_time != null
-      ? form.mold_change_time
-      : form.loading_unloading;
     const moldDetails = {
       part_no: form.part_no || null,
       standard_cavity: form.standard_cavity !== '' ? Number(form.standard_cavity) : null,
@@ -447,7 +446,6 @@ export default function ProductionPlanning() {
       cavity_id: form.cavity_id || null,
       cavity_change: !!form.cavity_change,
       target_per_shift: form.target_per_shift !== '' ? Number(form.target_per_shift) : null,
-      mold_change_time: moldChange !== '' ? Number(moldChange) : null,
       mold_status: form.mold_status || null,
       assigned_by: form.assigned_by || null,
       mold_code: selectedMold?.tool_code || null,
@@ -459,7 +457,7 @@ export default function ProductionPlanning() {
       mold_id: form.mold_id ? parseInt(form.mold_id, 10) : null,
       mold_details: moldDetails,
       process_time: parseCtSeconds(form.process_time),
-      loading_unloading: parseCtSeconds(moldChange),
+      loading_unloading: 0,
       planned_qty: parseInt(form.planned_qty, 10),
       priority: parseInt(form.priority, 10),
       shift: shifts[0],
@@ -742,8 +740,8 @@ export default function ProductionPlanning() {
           p.current_operation,
           p.next_operation,
           p.process_time,
-          p.loading_unloading,
-          sumCt(p.process_time, p.loading_unloading),
+          0,
+          parseCtSeconds(p.process_time),
           p.plan_type,
           p.priority,
           p.planned_qty,
@@ -1495,9 +1493,6 @@ export default function ProductionPlanning() {
                 <FField t={t} label="Target / Shift">
                   <input style={{ ...s.inp, background: t.bg }} readOnly value={form.target_per_shift} />
                 </FField>
-                <FField t={t} label="Mold Change Time (sec)">
-                  <input style={{ ...s.inp, background: t.bg }} readOnly value={form.mold_change_time} />
-                </FField>
                 <FField t={t} label="Mold Status">
                   <input style={{ ...s.inp, background: t.bg }} readOnly value={form.mold_status} />
                 </FField>
@@ -1508,7 +1503,7 @@ export default function ProductionPlanning() {
                   <input
                     style={{ ...s.inp, background: t.bg, color: t.brand, fontWeight: 700 }}
                     readOnly
-                    value={formatCtSeconds(sumCt(form.process_time, form.mold_change_time || form.loading_unloading))}
+                    value={form.process_time === '' || form.process_time == null || Number.isNaN(Number(form.process_time)) ? '' : formatCtSeconds(form.process_time)}
                   />
                 </FField>
               </div>
@@ -1521,7 +1516,8 @@ export default function ProductionPlanning() {
                         {selectedMachine ? ` · ${selectedMachine.name}` : ''}
                       </div>
                       <div style={{ fontSize: 11, color: t.textFaint, marginTop: 2 }}>
-                        Based on CT {formatCtSeconds(sumCt(form.process_time, form.loading_unloading))}s and shift hours (breaks deducted)
+                        Based on CT {formatCtSeconds(form.process_time)}s × running cavity {shiftCapacityHints.runningCavity}
+                        {' '}(pcs = shots × cavity) and net shift hours (breaks deducted)
                       </div>
                     </div>
                     {shiftCapacityHints.suggestedQty > 0 && (
@@ -1551,6 +1547,7 @@ export default function ProductionPlanning() {
                           <strong style={{ color: t.text }}>{row.shiftName}</strong>
                           <span>({shiftDef?.start}–{shiftDef?.end})</span>
                           <span>· {row.workingMinutes} min net</span>
+                          <span>· {row.maxShots} shots × {row.runningCavity} cav</span>
                           <span>· max <strong style={{ color: '#0ea5e9' }}>{row.maxQty} pcs</strong>/shift</span>
                         </div>
                       );
@@ -1577,7 +1574,7 @@ export default function ProductionPlanning() {
                   </div>
                 </div>
               )}
-              {!shiftCapacityHints && (form.process_time || form.loading_unloading) && selectedShifts.length > 0 && (
+              {!shiftCapacityHints && form.process_time && selectedShifts.length > 0 && (
                 <div style={{ gridColumn: '1 / -1', fontSize: 11, color: t.textFaint }}>
                   Enter valid process time to see shift capacity estimate.
                 </div>
@@ -1840,7 +1837,7 @@ export default function ProductionPlanning() {
                       </div>
                     )}
                     <div style={{ color: t.textMuted, fontSize: 11 }}>
-                      Planned: {p.planned_qty} | CT: {formatCtSeconds(sumCt(p.process_time, p.loading_unloading))}s | {p.shift} | {p.plan_date}
+                      Planned: {p.planned_qty} | CT: {formatCtSeconds(p.process_time)}s | {p.shift} | {p.plan_date}
                     </div>
                     {idx === 0 && p.status === 'pending' && p.awaiting_model_change && (
                       <span title="Approve on Model Change page to start plan and apply part on WI"
@@ -1960,7 +1957,7 @@ export default function ProductionPlanning() {
                     </td>
                     <td style={s.td}>{p.mold_label || p.mold_name || planModelVariant(p, parts) || p.model_variant || '—'}</td>
                     <td style={s.td}>{p.mold_details?.cavity_name || p.next_operation || '—'}</td>
-                    <td style={s.td}>{formatCtSeconds(sumCt(p.process_time, p.loading_unloading))}</td>
+                    <td style={s.td}>{formatCtSeconds(p.process_time)}</td>
                     <td style={s.td}>
                       <span style={{ ...s.typeBadge, background: TYPE_CFG[p.plan_type]?.color + '33',
                                      color: TYPE_CFG[p.plan_type]?.color }}>

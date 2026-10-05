@@ -79,39 +79,111 @@ function durationLabel(ms) {
   return `${s}s`;
 }
 
-function ReasonButton({ label, selected, onClick, accent, mutedBorder, surface, text }) {
+const REASON_3D_CSS = `
+@keyframes breakdownCapsuleGlow {
+  0%, 100% {
+    box-shadow:
+      0 2px 0 rgba(0,0,0,0.18),
+      0 6px 14px rgba(0,0,0,0.18),
+      0 0 0 2px var(--bd-glow-ring),
+      0 0 10px 2px var(--bd-glow-soft);
+  }
+  50% {
+    box-shadow:
+      0 2px 0 rgba(0,0,0,0.18),
+      0 8px 18px rgba(0,0,0,0.22),
+      0 0 0 3px var(--bd-glow-ring),
+      0 0 22px 6px var(--bd-glow-strong);
+  }
+}
+.bd-reason-3d {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  text-align: center;
+  border: 1.5px solid var(--bd-edge);
+  background: var(--bd-gradient);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.45),
+    inset 0 -2px 0 rgba(0,0,0,0.14),
+    0 3px 0 rgba(0,0,0,0.16),
+    0 8px 14px rgba(0,0,0,0.16);
+  transform: translateY(0);
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease, filter 0.12s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.bd-reason-3d:hover {
+  transform: translateY(-1px);
+  filter: saturate(1.08) brightness(1.03);
+}
+.bd-reason-3d:active {
+  transform: translateY(2px);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.18),
+    0 1px 0 rgba(0,0,0,0.2),
+    0 3px 8px rgba(0,0,0,0.16);
+}
+.bd-reason-3d.is-selected {
+  border-color: var(--bd-accent);
+  border-width: 2px;
+  animation: breakdownCapsuleGlow 1.15s ease-in-out infinite;
+}
+.bd-reason-3d .bd-reason-label {
+  font-size: 12px;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+  font-weight: 700;
+  color: var(--bd-label) !important;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.35);
+  -webkit-text-fill-color: var(--bd-label);
+}
+.bd-reason-3d.is-selected .bd-reason-label {
+  color: var(--bd-accent) !important;
+  -webkit-text-fill-color: var(--bd-accent);
+  font-weight: 800;
+}
+`;
+
+function ReasonButton({ label, selected, onClick, accent, kind }) {
+  const isPlanned = kind === 'planned';
+  // Saturated theme gradients (blue planned / red unplanned) — label stays dark for contrast
+  const labelColor = '#0f172a';
+  const gradient = selected
+    ? (isPlanned
+      ? 'linear-gradient(180deg, #93c5fd 0%, #60a5fa 38%, #3b82f6 100%)'
+      : 'linear-gradient(180deg, #fca5a5 0%, #f87171 38%, #ef4444 100%)')
+    : (isPlanned
+      ? 'linear-gradient(180deg, #bfdbfe 0%, #93c5fd 45%, #60a5fa 100%)'
+      : 'linear-gradient(180deg, #fecaca 0%, #fca5a5 45%, #f87171 100%)');
+  const edge = selected ? accent : (isPlanned ? '#2563eb' : '#dc2626');
+  const glowSoft = isPlanned ? 'rgba(37, 99, 235, 0.45)' : 'rgba(239, 68, 68, 0.45)';
+  const glowStrong = isPlanned ? 'rgba(37, 99, 235, 0.75)' : 'rgba(239, 68, 68, 0.75)';
+  const glowRing = selected ? (isPlanned ? 'rgba(37, 99, 235, 0.55)' : 'rgba(239, 68, 68, 0.55)') : 'transparent';
+
   return (
     <button
       type="button"
+      className={`bd-reason-3d${selected ? ' is-selected' : ''}`}
       onClick={onClick}
+      aria-pressed={selected}
+      title={label}
       style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'stretch',
-        width: '100%',
-        padding: 0,
-        borderRadius: 8,
-        border: `1.5px solid ${selected ? accent : mutedBorder}`,
-        background: selected ? accent + '18' : surface,
-        cursor: 'pointer',
-        overflow: 'hidden',
-        textAlign: 'left',
+        '--bd-gradient': gradient,
+        '--bd-edge': edge,
+        '--bd-accent': isPlanned ? '#1d4ed8' : '#b91c1c',
+        '--bd-label': labelColor,
+        '--bd-glow-soft': glowSoft,
+        '--bd-glow-strong': glowStrong,
+        '--bd-glow-ring': glowRing,
       }}
     >
-      <div style={{
-        height: 5,
-        background: selected ? '#22c55e' : '#ef4444',
-        opacity: selected ? 1 : 0.85,
-      }} />
-      <div style={{
-        padding: '10px 12px',
-        color: selected ? accent : text,
-        fontSize: 12,
-        fontWeight: selected ? 700 : 600,
-        lineHeight: 1.3,
-      }}>
-        {label}
-      </div>
+      <span className="bd-reason-label">{label}</span>
     </button>
   );
 }
@@ -119,9 +191,7 @@ function ReasonButton({ label, selected, onClick, accent, mutedBorder, surface, 
 function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy, msg }) {
   const [downtimeType, setDowntimeType] = useState(null);
   const [reason, setReason] = useState('');
-  const [raisedMode, setRaisedMode] = useState(
-    user && ['operator', 'supervisor'].includes(user.role) ? 'select' : 'select'
-  );
+  const [raisedMode, setRaisedMode] = useState('select');
   const [raisedBy, setRaisedBy] = useState(
     user && ['operator', 'supervisor'].includes(user.role) ? String(user.id) : ''
   );
@@ -163,7 +233,7 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Log downtime"
+      aria-label="Raise breakdown to maintenance"
       onClick={onClose}
       style={{
         position: 'fixed', inset: 0, zIndex: 1000,
@@ -172,10 +242,11 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
         padding: 16,
       }}
     >
+      <style>{REASON_3D_CSS}</style>
       <div
         onClick={e => e.stopPropagation()}
         style={{
-          width: 'min(960px, 100%)',
+          width: 'min(980px, 100%)',
           maxHeight: '92vh',
           overflow: 'auto',
           background: t.surface,
@@ -190,10 +261,13 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
           background: t.surface2, position: 'sticky', top: 0, zIndex: 1,
         }}>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>Downtime</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>
+              Raise Issue to Maintenance
+            </div>
             <div style={{ fontSize: 12, color: t.accent, marginTop: 2 }}>
               {machine.name}
               {machine.machine_type ? ` · ${machine.machine_type}` : ''}
+              {' · '}Select reason + raised-by, then submit
             </div>
           </div>
           <button
@@ -211,78 +285,74 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
         <form onSubmit={handleSubmit} style={{ padding: 18 }}>
           <div style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
             gap: 16,
           }}>
-            {/* Planned */}
             <section style={{
               background: t.surface2, borderRadius: 10, padding: 14,
               border: `1px solid ${t.border}`,
             }}>
               <h4 style={{
-                margin: '0 0 12px', fontSize: 13, fontWeight: 700, color: '#2482da',
-                textTransform: 'uppercase', letterSpacing: 0.4,
+                margin: '0 0 12px', fontSize: 13, fontWeight: 800, color: '#38bdf8',
+                textTransform: 'uppercase', letterSpacing: 0.5,
               }}>
-                Planned Downtime
+                Machine Preventive / Planned
               </h4>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+                gap: 10,
+              }}>
                 {PLANNED_REASONS.map(r => (
                   <ReasonButton
                     key={r}
                     label={r}
+                    kind="planned"
                     selected={downtimeType === 'planned' && reason === r}
                     onClick={() => selectReason('planned', r)}
                     accent="#2482da"
-                    mutedBorder={t.border}
-                    surface={t.surface}
-                    text={t.text}
                   />
                 ))}
               </div>
             </section>
 
-            {/* Unplanned */}
             <section style={{
               background: t.surface2, borderRadius: 10, padding: 14,
               border: `1px solid ${t.border}`,
             }}>
               <h4 style={{
-                margin: '0 0 12px', fontSize: 13, fontWeight: 700, color: '#ef4444',
-                textTransform: 'uppercase', letterSpacing: 0.4,
+                margin: '0 0 12px', fontSize: 13, fontWeight: 800, color: '#f87171',
+                textTransform: 'uppercase', letterSpacing: 0.5,
               }}>
                 Unplanned Downtime
               </h4>
               <div style={{
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr',
-                gap: 8,
+                gap: 10,
                 alignItems: 'start',
               }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'grid', gap: 10 }}>
                   {unplannedLeft.map(r => (
                     <ReasonButton
                       key={r}
                       label={r}
+                      kind="unplanned"
                       selected={downtimeType === 'unplanned' && reason === r}
                       onClick={() => selectReason('unplanned', r)}
                       accent="#ef4444"
-                      mutedBorder={t.border}
-                      surface={t.surface}
-                      text={t.text}
                     />
                   ))}
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'grid', gap: 10 }}>
                   {unplannedRight.map(r => (
                     <ReasonButton
                       key={r}
                       label={r}
+                      kind="unplanned"
                       selected={downtimeType === 'unplanned' && reason === r}
                       onClick={() => selectReason('unplanned', r)}
                       accent="#ef4444"
-                      mutedBorder={t.border}
-                      surface={t.surface}
-                      text={t.text}
                     />
                   ))}
                 </div>
@@ -290,7 +360,6 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
             </section>
           </div>
 
-          {/* Selected summary */}
           <div style={{
             marginTop: 14, padding: '10px 12px', borderRadius: 8,
             background: reason ? (downtimeType === 'planned' ? '#2482da18' : '#ef444418') : t.surface2,
@@ -299,10 +368,9 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
           }}>
             {reason
               ? <>Selected: <b>{downtimeType === 'planned' ? 'Planned' : 'Unplanned'}</b> — {reason}</>
-              : 'Select a downtime reason above'}
+              : 'Select a breakdown / downtime reason (button blinks when selected)'}
           </div>
 
-          {/* Raised by */}
           <div style={{
             marginTop: 16, padding: 14, borderRadius: 10,
             border: `1px solid ${t.border}`, background: t.surface2,
@@ -311,7 +379,7 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               marginBottom: 10, flexWrap: 'wrap', gap: 8,
             }}>
-              <h4 style={{ margin: 0, fontSize: 13, color: t.accent }}>Raised By</h4>
+              <h4 style={{ margin: 0, fontSize: 13, color: t.accent }}>Raised By (name)</h4>
               <div style={{ display: 'flex', gap: 6 }}>
                 {[
                   ['select', 'Select user'],
@@ -350,7 +418,7 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
             ) : (
               <input
                 style={inp}
-                placeholder="Enter name of person raising the downtime"
+                placeholder="Enter name of person raising the issue"
                 value={raisedByName}
                 onChange={e => setRaisedByName(e.target.value)}
                 required
@@ -359,7 +427,7 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
 
             <input
               style={{ ...inp, marginTop: 10 }}
-              placeholder="Optional notes…"
+              placeholder="Optional notes for maintenance…"
               value={notes}
               onChange={e => setNotes(e.target.value)}
             />
@@ -391,15 +459,22 @@ function DowntimeModal({ machine, users, user, theme: t, onClose, onSubmit, busy
               type="submit"
               disabled={!canSubmit || busy}
               style={{
-                padding: '8px 20px', borderRadius: 6, cursor: canSubmit && !busy ? 'pointer' : 'not-allowed',
-                border: 'none', fontWeight: 700, fontSize: 13, color: '#fff',
+                padding: '10px 22px', borderRadius: 8, cursor: canSubmit && !busy ? 'pointer' : 'not-allowed',
+                border: 'none', fontWeight: 800, fontSize: 13, color: '#fff',
                 background: canSubmit && !busy
-                  ? (downtimeType === 'planned' ? '#2482da' : '#ef4444')
+                  ? (downtimeType === 'planned'
+                    ? 'linear-gradient(180deg, #38bdf8 0%, #1d4ed8 100%)'
+                    : 'linear-gradient(180deg, #f87171 0%, #b91c1c 100%)')
                   : t.border,
+                boxShadow: canSubmit && !busy
+                  ? (downtimeType === 'planned'
+                    ? '0 4px 0 #1e3a8a, 0 8px 16px rgba(0,0,0,0.25)'
+                    : '0 4px 0 #7f1d1d, 0 8px 16px rgba(0,0,0,0.25)')
+                  : 'none',
                 opacity: canSubmit && !busy ? 1 : 0.7,
               }}
             >
-              {busy ? 'Logging…' : 'Log Downtime'}
+              {busy ? 'Raising…' : 'Raise to Maintenance'}
             </button>
           </div>
         </form>
@@ -511,8 +586,8 @@ export default function Breakdown() {
     setModalMsg('');
     try {
       await api.post('/api/breakdown/', payload);
-      setModalMsg('✓ Downtime logged');
-      setMsg(`✓ Downtime logged for ${selectedMachine?.name || 'machine'}`);
+      setModalMsg('✓ Issue raised to maintenance');
+      setMsg(`✓ Issue raised for ${selectedMachine?.name || 'machine'}`);
       setTimeout(() => {
         setSelectedMachine(null);
         setModalMsg('');
@@ -614,7 +689,7 @@ export default function Breakdown() {
             <h4 style={{ color: t.accent, margin: 0, fontSize: 14 }}>Machine Status Layout</h4>
             {canLog && (
               <span style={{ fontSize: 12, color: t.textMuted }}>
-                Click a machine to log planned / unplanned downtime
+                Click a machine to raise planned / unplanned downtime to maintenance
               </span>
             )}
           </div>
@@ -637,7 +712,7 @@ export default function Breakdown() {
                 <div
                   key={m.id}
                   onClick={() => openDowntimeModal(m)}
-                  title={canLog ? (activeTickets.length ? 'Active downtime ticket exists' : 'Click to log downtime') : undefined}
+                  title={canLog ? (activeTickets.length ? 'Active downtime ticket exists' : 'Click to raise issue to maintenance') : undefined}
                   style={{
                     background: t.surface2, borderRadius: 10, padding: 14,
                     border: `2px solid ${mStatus.color}`, textAlign: 'center',

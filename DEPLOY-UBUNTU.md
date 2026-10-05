@@ -1,4 +1,4 @@
-﻿# EAP PMS â€” Ubuntu Deployment
+# EAP PMS â€” Ubuntu Deployment
 
 Deploy on Ubuntu IPC/server using **git clone** (recommended) or a **zip package** from Windows.
 

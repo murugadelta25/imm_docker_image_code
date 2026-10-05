@@ -1,4 +1,4 @@
-﻿# EAP PMS â€” Software Architecture Document
+# EAP PMS â€” Software Architecture Document
 
 **Project:** Production Monitoring System (PMS)  
 **Version:** 1.0  

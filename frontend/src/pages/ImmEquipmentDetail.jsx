@@ -297,9 +297,7 @@ export default function ImmEquipmentDetail() {
       {
         key: 'prod_target',
         label: labelIn('Prod Target Count', 'Nos.'),
-        value: Object.prototype.hasOwnProperty.call(pc, 'prod_target')
-          ? n(pc.prod_target)
-          : fmt('Production_Target_Count'),
+        value: pc.prod_target != null ? n(pc.prod_target) : fmt('Production_Target_Count'),
         shift: false,
       },
       {

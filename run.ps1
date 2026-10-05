@@ -4,6 +4,7 @@
 #   .\run.ps1 preflight
 #   .\run.ps1 help
 # Note: ASCII-only output for Windows PowerShell encoding compatibility
+# IMM ports: frontend 5174, backend 8040 (same as Ubuntu; PMS uses 5173 / 8030)
 
 param(
     [string]$Action = "start"
@@ -310,15 +311,27 @@ function Ensure-BackendDependencies {
         $null = & $venvPython -c "import fastapi, uvicorn" 2>&1
         if ($LASTEXITCODE -ne 0) { $venvOk = $false }
     }
+    # Leftover .venv.stale_* folders trigger WatchFiles reload loops on Windows —
+    # remove them whenever they are not locked.
+    Get-ChildItem -LiteralPath $BackendDir -Force -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like ".venv.stale_*" -or $_.Name -like ".venv.todelete_*" } |
+        ForEach-Object {
+            Write-Host ("  Removing leftover {0}..." -f $_.Name) -ForegroundColor DarkGray
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
     if (-not $venvOk) {
         if (Test-Path $venvDir) {
             Write-Host "  Replacing stale backend\.venv..." -ForegroundColor Yellow
             $bakName = ".venv.stale_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss")
+            $bakPath = Join-Path $BackendDir $bakName
             try {
                 Rename-Item -Path $venvDir -NewName $bakName -ErrorAction Stop
             } catch {
                 throw "backend\.venv is locked. Close Backend windows and retry. ($($_.Exception.Message))"
             }
+            # Best-effort delete after rename so WatchFiles never sees it
+            Remove-Item -LiteralPath $bakPath -Recurse -Force -ErrorAction SilentlyContinue
         }
         Write-Host "  Creating Python venv for this project (backend\.venv)..." -ForegroundColor Yellow
         python -m venv $venvDir
@@ -546,12 +559,18 @@ if ($backendAlreadyUp) {
 } else {
     Stop-PortListeners -Port $BackendPort
     Start-Sleep -Milliseconds 500
-    $backendLog = Join-Path $env:TEMP "eap_pms_backend_8040.log"
+    $backendLog = Join-Path $env:TEMP ("eap_imm_backend_{0}.log" -f $BackendPort)
+    # No --reload on Windows: WatchFiles still scans cwd siblings (.venv.stale_*) and
+    # causes endless restart loops. Restart backend manually after code changes.
+    # Do not pipe through Tee-Object: uvicorn writes INFO to stderr and PowerShell treats
+    # that as NativeCommandError, which can kill the process.
     $backendCmd = @"
 Set-Location -LiteralPath '$BackendDir'
-`$host.UI.RawUI.WindowTitle = 'EAP PMS Backend :$BackendPort'
+`$host.UI.RawUI.WindowTitle = 'EAP IMM Backend :$BackendPort'
+`$ErrorActionPreference = 'Continue'
 Write-Host 'Backend starting... log: $backendLog' -ForegroundColor Cyan
-& '$venvPython' -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload 2>&1 | Tee-Object -FilePath '$backendLog'
+try { Start-Transcript -Path '$backendLog' -Append -Force | Out-Null } catch {}
+& '$venvPython' -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort
 "@
     Start-Process powershell -ArgumentList @(
         "-NoExit", "-Command", $backendCmd
@@ -584,7 +603,7 @@ Write-Host 'Backend starting... log: $backendLog' -ForegroundColor Cyan
 Write-StepHeader 6 "Starting frontend on port $FrontendPort..."
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
-    "cd '$FrontendDir'; npm run dev"
+    "cd '$FrontendDir'; npm run dev -- --host 0.0.0.0 --port $FrontendPort"
 ) -WindowStyle Normal
 Start-Sleep -Seconds 3
 $frontendOk = $false
@@ -665,8 +684,8 @@ foreach ($ip in $networkIPs) {
     Write-Host ("    -> Network (Vite :{0})  : http://{1}:{0}  (needs firewall rule)" -f $FrontendPort, $ip) -ForegroundColor DarkGray
 }
 Write-Host ""
-Write-Host "  LAN tip: use port 80 / din.eappms from other PCs. :5174 times out if Windows Firewall blocks Vite." -ForegroundColor Yellow
-Write-Host "  502 Bad Gateway usually means backend (8040) or frontend (5174) window stopped - keep both open." -ForegroundColor Yellow
+Write-Host ("  LAN tip: use port 80 / din.eappms from other PCs. :{0} times out if Windows Firewall blocks Vite." -f $FrontendPort) -ForegroundColor Yellow
+Write-Host ("  502 Bad Gateway usually means backend ({0}) or frontend ({1}) window stopped - keep both open." -f $BackendPort, $FrontendPort) -ForegroundColor Yellow
 Write-Host ""
 $primaryIp = if ($dnsCfg -and $dnsCfg.LanIp) { $dnsCfg.LanIp } else { Get-PrimaryLanIp -Ips $networkIPs -ProjectDir $ProjectDir }
 Write-Host "  Network access (Windows / Ubuntu / Android):" -ForegroundColor White

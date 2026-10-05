@@ -149,27 +149,35 @@ export function distributePlannedToSlots(slotWeights, target) {
   return scaled;
 }
 
-/** Theoretical max parts for one shift slot (uses shift window + configured breaks). */
-export function computeShiftCapacity(ctSec, shift, breakCfg = {}) {
+/**
+ * Theoretical max for one shift slot (shift window + configured breaks).
+ * Shots = net minutes × 60 / CT; pcs = shots × running cavity.
+ */
+export function computeShiftCapacity(ctSec, shift, breakCfg = {}, runningCavity = 1) {
   const shiftMinutes = timeToMinutes(shift?.start, shift?.end);
   const breakWindows = getBreakWindows(breakCfg);
   const breakMinutes = breakWindows.reduce((sum, w) => sum + w.minutes, 0)
     + (breakCfg.other_cleaning || 0)
     + (breakCfg.management_meeting || 0);
   const workingMinutes = Math.max(0, shiftMinutes - breakMinutes);
+  const cav = Number(runningCavity);
+  const cavity = Number.isFinite(cav) && cav > 0 ? cav : 1;
+  const maxShots = expectedParts(ctSec, workingMinutes);
   return {
     shiftId: shift?.id,
     shiftName: shift?.name || shift?.id || 'Shift',
     shiftMinutes,
     breakMinutes,
     workingMinutes,
-    maxQty: expectedParts(ctSec, workingMinutes),
+    runningCavity: cavity,
+    maxShots,
+    maxQty: Math.round(maxShots * cavity),
   };
 }
 
 /**
- * Planner hints: per-shift CT capacity, WO cap, and a safe suggested qty per slot.
- * suggestedQty = min(lowest shift theoretical max, WO max per shift slot).
+ * Planner hints: per-shift CT × cavity capacity, WO cap, and suggested qty per slot.
+ * suggestedQty = min(lowest shift theoretical pcs, WO max per shift slot).
  */
 export function computePlanningCapacityHints({
   ctSec,
@@ -177,9 +185,11 @@ export function computePlanningCapacityHints({
   breaks = {},
   unplannedQty = null,
   slotCount = 1,
+  runningCavity = 1,
 }) {
   if (!ctSec || ctSec <= 0 || !shifts.length) return null;
-  const perShift = shifts.map((sh) => computeShiftCapacity(ctSec, sh, breaks[sh.id] || {}));
+  const perShift = shifts.map((sh) =>
+    computeShiftCapacity(ctSec, sh, breaks[sh.id] || {}, runningCavity));
   const theoreticalMin = Math.min(...perShift.map((row) => row.maxQty));
   const woCapPerShift = slotCount > 0 && unplannedQty != null
     ? Math.floor(unplannedQty / slotCount)
@@ -187,8 +197,10 @@ export function computePlanningCapacityHints({
   const suggestedQty = woCapPerShift != null
     ? Math.min(theoreticalMin, woCapPerShift)
     : theoreticalMin;
+  const cav = Number(runningCavity);
   return {
     perShift,
+    runningCavity: Number.isFinite(cav) && cav > 0 ? cav : 1,
     theoreticalMin,
     theoreticalMax: Math.max(...perShift.map((row) => row.maxQty)),
     woCapPerShift,

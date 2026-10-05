@@ -12,7 +12,8 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", @"
   if (Test-Path '.venv\Scripts\Activate.ps1') { .\.venv\Scripts\Activate.ps1 }
   elseif (Test-Path 'venv\Scripts\Activate.ps1') { .\venv\Scripts\Activate.ps1 }
   else { python -m venv .venv; .\.venv\Scripts\Activate.ps1; pip install -r requirements.txt }
-  uvicorn app.main:app --host 0.0.0.0 --port 8040 --reload
+  # No --reload: WatchFiles + leftover .venv.stale_* causes restart loops on Windows
+  uvicorn app.main:app --host 0.0.0.0 --port 8040
 "@
 
 Start-Sleep -Seconds 2

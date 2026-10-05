@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 import json
 import io
-from ..models import Machine, Station, ProductionPlan, MachineStatusLog, SiteConfig, OEEEntry, ModelChangeRequest, Part, get_db, now_ist
+from ..models import Machine, Station, ProductionPlan, MachineStatusLog, SiteConfig, OEEEntry, ModelChangeRequest, Part, ToolStock, ImmMold, ImmShotEvent, get_db, now_ist
 from ..auth import get_current_user
 from .config import DEFAULT_CONFIG, merge_config
 
@@ -18,6 +18,8 @@ MICRO_GAP_SEC = 15
 STATE_LABELS = [
     ('running', 'Running'),
     ('expected', 'Possible Output'),
+    ('shot_weight_g', 'Shot Weight (g)'),
+    ('req_rm_kg', 'Req RM (kg)'),
     ('ar', 'AR %'),
     ('pr', 'PR %'),
     ('qr', 'QR %'),
@@ -204,6 +206,250 @@ def _plan_ct(plan) -> float:
     if stored is not None and float(stored) > 0:
         return float(stored)
     return _float_ct(plan.process_time, plan.loading_unloading)
+
+
+def _parse_mold_details(plan) -> dict:
+    raw = getattr(plan, 'mold_details_json', None) if plan else None
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+def _primary_plan(plans: list):
+    if not plans:
+        return None
+    rank = {'running': 0, 'paused': 1, 'completed': 2, 'pending': 3}
+    return sorted(
+        plans,
+        key=lambda p: (rank.get(getattr(p, 'status', None), 9), getattr(p, 'priority', None) or 9999, p.id),
+    )[0]
+
+
+def _running_cavity_from_plan(plan, default: int = 1) -> int:
+    details = _parse_mold_details(plan)
+    raw = details.get('running_cavity')
+    try:
+        n = int(raw)
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _shot_weight_from_plan(plan) -> Optional[float]:
+    details = _parse_mold_details(plan)
+    raw = details.get('std_shot_weight')
+    try:
+        if raw is None or raw == '':
+            return None
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mounted_tool(db: Session, machine_id: int) -> Optional[ToolStock]:
+    """Active ImmMold on machine → ToolStock mold master."""
+    try:
+        imm = (
+            db.query(ImmMold)
+            .filter(ImmMold.machine_id == machine_id, ImmMold.is_active == 1)
+            .first()
+        )
+        if not imm:
+            return None
+        from ..tool_service import find_tool_by_mold_no
+        return find_tool_by_mold_no(db, getattr(imm, 'mold_no', None))
+    except Exception:
+        return None
+
+
+def _part_display_name(db: Session, part_no: Optional[str]) -> Optional[str]:
+    if not part_no:
+        return None
+    part = db.query(Part).filter(Part.part_no == str(part_no).strip(), Part.active == 1).first()
+    if not part:
+        part = db.query(Part).filter(Part.part_no == str(part_no).strip()).first()
+    if not part:
+        return None
+    name = (getattr(part, 'part_name', None) or '').strip()
+    return name or None
+
+
+def _imm_context(db: Session, machine_id: int, machine_plans: list) -> dict:
+    """Resolve part/mold labels, CT, cavity, and shot weight for hourly IMM cards."""
+    primary = _primary_plan(machine_plans)
+    details = _parse_mold_details(primary)
+    tool = None
+    if primary and getattr(primary, 'mold_id', None):
+        tool = db.query(ToolStock).filter(ToolStock.id == primary.mold_id).first()
+    if tool is None:
+        tool = _mounted_tool(db, machine_id)
+
+    cavity = _running_cavity_from_plan(primary, default=0)
+    if cavity <= 0 and tool and getattr(tool, 'running_cavity', None):
+        try:
+            cavity = max(1, int(tool.running_cavity))
+        except (TypeError, ValueError):
+            cavity = 1
+    if cavity <= 0:
+        cavity = 1
+
+    shot_w = _shot_weight_from_plan(primary)
+    if shot_w is None and tool and getattr(tool, 'std_shot_weight', None) is not None:
+        try:
+            shot_w = float(tool.std_shot_weight)
+        except (TypeError, ValueError):
+            shot_w = None
+
+    ct = _plan_ct(primary) if primary else 0.0
+    if ct <= 0 and details.get('standard_cycle_time') not in (None, ''):
+        try:
+            ct = float(details['standard_cycle_time'])
+        except (TypeError, ValueError):
+            pass
+    if ct <= 0 and tool and getattr(tool, 'standard_cycle_time', None) is not None:
+        try:
+            ct = float(tool.standard_cycle_time)
+        except (TypeError, ValueError):
+            pass
+
+    part_no = (details.get('part_no') or '').strip() or None
+    if not part_no and tool:
+        from ..tool_service import effective_part_no
+        part_no = (effective_part_no(tool) or getattr(tool, 'part_no', None) or '').strip() or None
+
+    mold_name = (
+        (details.get('mold_name') or details.get('mold_code') or '').strip()
+        or (getattr(tool, 'tool_name', None) if tool else None)
+        or (getattr(tool, 'tool_code', None) if tool else None)
+        or None
+    )
+    part_name = _part_display_name(db, part_no)
+    display_name = part_name or part_no or mold_name or ''
+
+    # Prefer ImmShotEvent path when mold is mounted or shots exist for this machine
+    use_imm_shots = False
+    try:
+        has_mold = (
+            db.query(ImmMold.id)
+            .filter(ImmMold.machine_id == machine_id)
+            .limit(1)
+            .first()
+        ) is not None
+        use_imm_shots = bool(has_mold or tool or primary)
+    except Exception:
+        use_imm_shots = bool(tool or primary)
+
+    return {
+        'running_cavity': cavity,
+        'std_shot_weight': shot_w,
+        'cycle_time': ct,
+        'part_no': part_no,
+        'part_name': part_name,
+        'mold_name': mold_name,
+        'display_name': display_name,
+        'use_imm_shots': use_imm_shots,
+        'primary_plan': primary,
+    }
+
+
+def _hourly_imm_shot_counts(
+    db: Session,
+    machine_id: int,
+    slots: list,
+    shift_start: datetime,
+    shift_end: datetime,
+    effective_end: datetime,
+) -> list:
+    """Incremental ImmShotEvent counts per hourly slot."""
+    n = len(slots)
+    if n == 0 or effective_end <= shift_start:
+        return [0] * n
+    end = min(shift_end, effective_end)
+    rows = (
+        db.query(ImmShotEvent.recorded_at)
+        .filter(
+            ImmShotEvent.machine_id == machine_id,
+            ImmShotEvent.recorded_at >= shift_start,
+            ImmShotEvent.recorded_at < end,
+        )
+        .all()
+    )
+    counts = [0] * n
+    for (ts,) in rows:
+        if ts is None:
+            continue
+        idx = int((ts - shift_start).total_seconds() // 3600)
+        if 0 <= idx < n:
+            counts[idx] += 1
+    return counts
+
+
+def _scale_hourly_by_cavity(values: list, cavity: int) -> list:
+    cav = max(1, int(cavity or 1))
+    return [int(round((v or 0) * cav)) for v in values]
+
+
+def _material_rows(
+    shot_hourly: list,
+    expected_pcs_hourly: list,
+    cavity: int,
+    std_shot_weight: Optional[float],
+) -> tuple:
+    """Actual shot weight (g) and required RM (kg) from std shot weight.
+
+    Shot weight (g) = actual shots × std_shot_weight
+    Req RM (kg)    = possible_shots × std_shot_weight / 1000
+      where possible_shots = possible_pcs / running_cavity
+      (e.g. 90 shots × 65 g = 5850 g = 5.850 kg)
+    """
+    n = len(expected_pcs_hourly) if expected_pcs_hourly is not None else len(shot_hourly or [])
+    shots = list(shot_hourly or [0] * n)
+    if len(shots) < n:
+        shots = shots + [0] * (n - len(shots))
+    cav = max(1, int(cavity or 1))
+    try:
+        w = float(std_shot_weight) if std_shot_weight is not None else None
+    except (TypeError, ValueError):
+        w = None
+    if w is None or w <= 0:
+        return [0] * n, [0] * n
+
+    shot_weight_g = [round((s or 0) * w, 1) for s in shots[:n]]
+    req_rm_kg = []
+    for pcs in (expected_pcs_hourly or [0] * n)[:n]:
+        possible_shots = (pcs or 0) / cav
+        req_rm_kg.append(round(possible_shots * w / 1000.0, 3))
+    return shot_weight_g, req_rm_kg
+
+
+def _ct_capacity_hourly(
+    slots: list,
+    shift_start: datetime,
+    shift_end: datetime,
+    breaks: list,
+    ct: float,
+    cavity: int = 1,
+    windows: Optional[list] = None,
+) -> tuple:
+    """Possible pcs/hour = (net minutes × 60 / CT) × running cavity."""
+    if not ct or ct <= 0:
+        zeros = [0] * len(slots)
+        return zeros, 0
+    cav = max(1, int(cavity or 1))
+    hour_pcs = []
+    for s in slots:
+        lo, hi = _slot_bounds(shift_start, shift_end, s['slot_index'])
+        if windows:
+            shots = _slot_expected(windows, lo, hi, breaks)
+        else:
+            avail = _mins_available(lo, hi, breaks)
+            shots = _expected_parts(ct, avail)
+        hour_pcs.append(int(round(shots * cav)))
+    return hour_pcs, sum(hour_pcs)
 
 
 def _ct_for_plan_variant(plans: list, variant: str) -> float:
@@ -518,7 +764,7 @@ def _effective_ct(windows: list) -> float:
 def _variant_planned_qty(plans: list, variant: str) -> int:
     return sum(
         p.planned_qty or 0 for p in plans
-        if _plan_variant(p) == variant and getattr(p, 'status', None) in ('running', 'completed', 'paused')
+        if _plan_variant(p) == variant
     )
 
 
@@ -695,12 +941,18 @@ def _build_variant_breakdown(
     qr_val: float = 100.0,
     running_threshold_ratio: float = 0.3,
     break_cfg: Optional[dict] = None,
+    running_cavity: int = 1,
+    std_shot_weight: Optional[float] = None,
+    shot_hourly: Optional[list] = None,
+    use_imm_shots: bool = False,
 ) -> list:
     if not variants:
         return []
 
     shift_span = (shift_end - shift_start).total_seconds() or 1.0
     breakdown = []
+    cav = max(1, int(running_cavity or 1))
+    shot_w = float(std_shot_weight) if std_shot_weight is not None else None
 
     for variant in variants:
         planned = _variant_planned_qty(machine_plans, variant)
@@ -710,27 +962,56 @@ def _build_variant_breakdown(
 
         ct = _variant_ct(variant, windows, machine_plans, machine_oee)
 
-        expected_hourly, exp_shift_total, _ = _expected_hourly_slots(
-            slots, shift_start, shift_end, breaks, planned, var_windows, break_cfg,
-        )
+        # Possible = CT capacity × running cavity (not planned-qty distribution)
+        if ct > 0:
+            expected_hourly, exp_shift_total = _ct_capacity_hourly(
+                slots, shift_start, shift_end, breaks, ct, cav,
+                windows=var_windows or None,
+            )
+        else:
+            expected_hourly, exp_shift_total, _ = _expected_hourly_slots(
+                slots, shift_start, shift_end, breaks, planned, var_windows, break_cfg,
+            )
+            expected_hourly = _scale_hourly_by_cavity(expected_hourly, cav)
+            exp_shift_total = sum(expected_hourly)
 
         running_hourly, ld_hourly, idle_hourly = [], [], []
         status_windows = _status_windows_for_variant(
             variant, var_windows, windows, shift_start, shift_end,
         )
-        for s in slots:
-            slot_start = shift_start + timedelta(hours=s['slot_index'])
-            slot_end = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end)
-            running_hourly.append(_slot_parts_in_windows(
-                segments, status_windows, slot_start, slot_end, {'running'}, ct,
-                threshold_ratio=running_threshold_ratio,
-            ))
-            ld_hourly.append(_slot_parts_in_windows(
-                segments, status_windows, slot_start, slot_end, {'ld_unld'}, ct,
-            ))
-            idle_hourly.append(_slot_parts_in_windows(
-                segments, status_windows, slot_start, slot_end, {'idle'}, ct,
-            ))
+
+        if use_imm_shots and shot_hourly is not None:
+            running_hourly = _scale_hourly_by_cavity(shot_hourly, cav)
+            for s in slots:
+                slot_start = shift_start + timedelta(hours=s['slot_index'])
+                slot_end = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end)
+                ld_hourly.append(_slot_parts_in_windows(
+                    segments, status_windows, slot_start, slot_end, {'ld_unld'}, ct,
+                ))
+                idle_hourly.append(_slot_parts_in_windows(
+                    segments, status_windows, slot_start, slot_end, {'idle'}, ct,
+                ))
+        else:
+            for s in slots:
+                slot_start = shift_start + timedelta(hours=s['slot_index'])
+                slot_end = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end)
+                running_hourly.append(_slot_parts_in_windows(
+                    segments, status_windows, slot_start, slot_end, {'running'}, ct,
+                    threshold_ratio=running_threshold_ratio,
+                ) * cav)
+                ld_hourly.append(_slot_parts_in_windows(
+                    segments, status_windows, slot_start, slot_end, {'ld_unld'}, ct,
+                ))
+                idle_hourly.append(_slot_parts_in_windows(
+                    segments, status_windows, slot_start, slot_end, {'idle'}, ct,
+                ))
+
+        shot_row = list(shot_hourly) if shot_hourly is not None else [
+            int(round((v or 0) / cav)) for v in running_hourly
+        ]
+        shot_weight_hourly, req_rm_kg_hourly = _material_rows(
+            shot_row, expected_hourly, cav, shot_w,
+        )
 
         # OEE metrics per variant per slot — AR uses operating time (running + ld_unld)
         var_op_mins = []
@@ -763,6 +1044,8 @@ def _build_variant_breakdown(
             '_w_end': w_end,
             'cycle_time': ct,
             'cycle_time_display': _fmt_ct_val(ct) if ct else '0',
+            'running_cavity': cav,
+            'std_shot_weight': shot_w,
             'window_start': w_start.strftime('%H:%M'),
             'window_end': w_end.strftime('%H:%M'),
             'timeline_pct_start': round((w_start - shift_start).total_seconds() / shift_span * 100, 2),
@@ -772,6 +1055,9 @@ def _build_variant_breakdown(
                 'ld_unld': ld_hourly,
                 'idle': idle_hourly,
                 'expected': expected_hourly,
+                'shots': shot_row,
+                'shot_weight_g': shot_weight_hourly,
+                'req_rm_kg': req_rm_kg_hourly,
                 'ar': ar_h,
                 'pr': pr_h,
                 'qr': qr_h,
@@ -782,6 +1068,9 @@ def _build_variant_breakdown(
                 'ld_unld': sum(ld_hourly),
                 'idle': sum(idle_hourly),
                 'expected': exp_shift_total,
+                'shots': sum(shot_row),
+                'shot_weight_g': round(sum(shot_weight_hourly), 1),
+                'req_rm_kg': round(sum(req_rm_kg_hourly), 3),
                 'ar': ar_t,
                 'pr': pr_t,
                 'qr': qr_t,
@@ -1507,16 +1796,45 @@ def build_hourly_output(
         variants = _collect_variants(machine_plans, machine_oee, machine_mcrs)
         cycle_times = _collect_cycle_times(machine_plans, machine_oee)
         planned_total = sum(p.planned_qty or 0 for p in machine_plans)
+        imm = _imm_context(db, m.id, machine_plans)
+        running_cavity = int(imm['running_cavity'] or 1)
+        std_shot_weight = imm.get('std_shot_weight')
+        use_imm_shots = bool(imm.get('use_imm_shots'))
 
         windows = _production_windows(shift_start, shift_end, machine_plans, machine_oee)
         eff_ct = _effective_ct(windows) if windows else 0.0
         primary_ct = _plan_ct(machine_plans[0]) if len(machine_plans) == 1 else eff_ct
         if not primary_ct and cycle_times:
             primary_ct = cycle_times[0]
+        if not primary_ct and imm.get('cycle_time'):
+            primary_ct = float(imm['cycle_time'])
+        if primary_ct and primary_ct not in cycle_times:
+            cycle_times = [primary_ct] + list(cycle_times)
 
-        expected_hourly, exp_shift_total, _ = _expected_hourly_slots(
-            slots, shift_start, shift_end, breaks, planned_total, windows, break_cfg,
+        # When no plan variants, still show mounted mold / part label on the card
+        display_name = (imm.get('display_name') or '').strip()
+        if not variants and display_name:
+            variants = [display_name]
+
+        # Full-shift synthetic window when no plan windows but CT is known (mounted mold)
+        if not windows and primary_ct and primary_ct > 0:
+            windows = [{
+                'start': shift_start,
+                'end': shift_end,
+                'ct': primary_ct,
+                'variant': variants[0] if variants else '',
+            }]
+
+        expected_hourly, exp_shift_total = _ct_capacity_hourly(
+            slots, shift_start, shift_end, breaks, primary_ct or 0.0, running_cavity,
+            windows=windows or None,
         )
+        if not primary_ct and planned_total > 0:
+            expected_hourly, exp_shift_total, _ = _expected_hourly_slots(
+                slots, shift_start, shift_end, breaks, planned_total, windows, break_cfg,
+            )
+            expected_hourly = _scale_hourly_by_cavity(expected_hourly, running_cavity)
+            exp_shift_total = sum(expected_hourly)
 
         cycle_profile = None
         active_variants = [
@@ -1540,6 +1858,10 @@ def build_hourly_output(
 
         segments = _build_status_segments(db, m.id, shift_start, effective_end, cycle_profile, ld_unld_max, micro_gap)
 
+        shot_hourly = _hourly_imm_shot_counts(
+            db, m.id, slots, shift_start, shift_end, effective_end,
+        ) if use_imm_shots else None
+
         def count_transitions_through(slot_end_dt: datetime, state_filter):
             """Count transitions (occurrences) from shift_start up to slot_end_dt."""
             slot_end_dt = min(slot_end_dt, effective_end)
@@ -1555,14 +1877,43 @@ def build_hourly_output(
                 return _countable_running_segments(relevant, threshold_reference_sec, running_part_threshold_ratio)
             return len(relevant)
 
-        running_cum, ld_cum, idle_cum = [], [], []
-        for s in slots:
-            slot_end_dt = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end, effective_end)
-            running_cum.append(count_transitions_through(slot_end_dt, {'running'}))
-            ld_cum.append(count_transitions_through(slot_end_dt, {'ld_unld'}))
-            idle_cum.append(count_transitions_through(slot_end_dt, {'idle'}))
+        if use_imm_shots and shot_hourly is not None:
+            running_inc = _scale_hourly_by_cavity(shot_hourly, running_cavity)
+            running_cum = []
+            acc = 0
+            for v in running_inc:
+                acc += v
+                running_cum.append(acc)
+            ld_cum, idle_cum = [], []
+            for s in slots:
+                slot_end_dt = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end, effective_end)
+                ld_cum.append(count_transitions_through(slot_end_dt, {'ld_unld'}))
+                idle_cum.append(count_transitions_through(slot_end_dt, {'idle'}))
+        else:
+            running_cum, ld_cum, idle_cum = [], [], []
+            for s in slots:
+                slot_end_dt = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end, effective_end)
+                running_cum.append(
+                    count_transitions_through(slot_end_dt, {'running'}) * running_cavity
+                )
+                ld_cum.append(count_transitions_through(slot_end_dt, {'ld_unld'}))
+                idle_cum.append(count_transitions_through(slot_end_dt, {'idle'}))
+            running_inc = [running_cum[0]] + [
+                max(0, running_cum[i] - running_cum[i - 1]) for i in range(1, len(running_cum))
+            ]
+            shot_hourly = [
+                int(round((v or 0) / max(1, running_cavity))) for v in running_inc
+            ]
 
-        ct_display = _ct_display_str(cycle_times)
+        if std_shot_weight is not None and float(std_shot_weight) > 0:
+            shot_weight_hourly, req_rm_kg_hourly = _material_rows(
+                shot_hourly, expected_hourly, running_cavity, std_shot_weight,
+            )
+        else:
+            shot_weight_hourly = [0] * len(slots)
+            req_rm_kg_hourly = [0] * len(slots)
+
+        ct_display = _ct_display_str(cycle_times) or (_fmt_ct_val(primary_ct) if primary_ct else None)
 
         # Per-slot OEE metrics
         # AR = Operating Time / Available Time
@@ -1577,7 +1928,6 @@ def build_hourly_output(
             operating_mins_per_slot.append(
                 _slot_state_minutes(segments, s_start, s_end, {'running', 'ld_unld'})
             )
-        running_inc = [running_cum[0]] + [max(0, running_cum[i] - running_cum[i - 1]) for i in range(1, len(running_cum))]
         ar_hourly, pr_hourly, qr_hourly, oee_hourly = _compute_oee_slots(
             running_inc, expected_hourly, operating_mins_per_slot, avail_mins, qr_val,
         )
@@ -1591,6 +1941,10 @@ def build_hourly_output(
             segments, machine_plans, machine_oee, qr_val,
             running_threshold_ratio=running_part_threshold_ratio,
             break_cfg=break_cfg,
+            running_cavity=running_cavity,
+            std_shot_weight=std_shot_weight,
+            shot_hourly=shot_hourly,
+            use_imm_shots=use_imm_shots,
         )
 
         from ..operator_presence import operator_fields_for_machine
@@ -1605,20 +1959,29 @@ def build_hourly_output(
             'location': m.location or '',
             'model_variants': variants,
             'model_variant': ' · '.join(variants) if variants else '',
+            'part_name': imm.get('part_name'),
+            'part_no': imm.get('part_no'),
+            'mold_name': imm.get('mold_name'),
+            'display_name': display_name,
+            'running_cavity': running_cavity,
+            'std_shot_weight': std_shot_weight,
             'variant_breakdown': variant_breakdown,
             'planned_qty': planned_total,
             'cycle_time': primary_ct if primary_ct else 0,
             'cycle_times': cycle_times,
             'cycle_time_display': ct_display,
-            'process_time': machine_plans[0].process_time if machine_plans else 0,
+            'process_time': machine_plans[0].process_time if machine_plans else (primary_ct or 0),
             'loading_unloading': machine_plans[0].loading_unloading if machine_plans else 0,
-            'cycle_time_source': 'production_plan' if machine_plans else ('oee' if machine_oee else 'none'),
+            'cycle_time_source': 'production_plan' if machine_plans else ('mold_master' if primary_ct else ('oee' if machine_oee else 'none')),
             **_op,
             'states': {
                 'running': running_cum,
                 'ld_unld': ld_cum,
                 'idle': idle_cum,
                 'expected': expected_hourly,
+                'shots': shot_hourly,
+                'shot_weight_g': shot_weight_hourly,
+                'req_rm_kg': req_rm_kg_hourly,
                 'ar': ar_hourly,
                 'pr': pr_hourly,
                 'qr': qr_hourly,
@@ -1629,6 +1992,9 @@ def build_hourly_output(
                 'ld_unld': ld_cum[-1] if ld_cum else 0,
                 'idle': idle_cum[-1] if idle_cum else 0,
                 'expected': exp_shift_total,
+                'shots': sum(shot_hourly or []),
+                'shot_weight_g': round(sum(shot_weight_hourly), 1),
+                'req_rm_kg': round(sum(req_rm_kg_hourly), 3),
                 'ar': ar_tot,
                 'pr': pr_tot,
                 'qr': qr_tot,

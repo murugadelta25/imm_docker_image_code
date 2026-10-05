@@ -1,4 +1,4 @@
-﻿# EAP PMS â€” System Architecture Document
+# EAP PMS â€” System Architecture Document
 
 **Product name:** EAP PMS (also branded **Titan OEE**)  
 **Document version:** 1.0  

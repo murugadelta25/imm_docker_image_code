@@ -1,4 +1,4 @@
-﻿# Standard URL â€” `din.eappms`
+# Standard URL â€” `din.eappms`
 
 > **Browser error `DNS_PROBE_FINISHED_NXDOMAIN`?**  
 > `din.eappms` is **not on the public internet**. Each PC must map the name to your IPC server IP (see [Fix NXDOMAIN](#fix-dns_probe_finished_nxdomain) below).

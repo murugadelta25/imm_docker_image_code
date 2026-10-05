@@ -12,12 +12,15 @@ echo "Packaging $APP_NAME for Ubuntu..."
 
 rsync -a "$ROOT/" "$STAGING/$APP_NAME/" \
   --exclude '.git' --exclude '.cursor' --exclude '.vscode' \
-  --exclude 'backend/venv' --exclude 'backend/__pycache__' \
+  --exclude 'backend/venv' --exclude 'backend/.venv' \
+  --exclude 'backend/.venv.stale_*' --exclude 'backend/.venv.todelete_*' \
+  --exclude 'backend/__pycache__' \
   --exclude 'frontend/node_modules' --exclude 'frontend/dist' \
   --exclude 'new_theme' --exclude 'TITAN_OEE_FULL_PACKAGE' --exclude 'demo' \
   --exclude 'database/backups' \
   --exclude 'backend/.env' --exclude 'frontend/.env' \
   --exclude 'database/db.config.json' \
+  --exclude 'deploy.env' \
   --exclude '*.log' --exclude '*.xlsx' --exclude '*.zip' \
   --exclude '**/__pycache__' \
   --exclude 'frontend/src/pages/gemini_*' \

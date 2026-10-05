@@ -201,12 +201,6 @@ def _prepare_plan_row(data: PlanCreate, db: Session, user) -> dict:
     if process_time is None:
         raise HTTPException(400, "Standard cycle time is required (select a mold or enter process time)")
     loading = data.loading_unloading
-    if details.get("mold_change_time") not in (None, ""):
-        try:
-            loading = float(details["mold_change_time"])
-        except (TypeError, ValueError):
-            pass
-
     row = data.model_dump(exclude={"end_date", "shifts", "tool_shortage_ack", "mold_details"})
     row["mold_id"] = mold.id if mold else data.mold_id
     row["mold_details_json"] = json.dumps(details) if details else None
@@ -214,7 +208,8 @@ def _prepare_plan_row(data: PlanCreate, db: Session, user) -> dict:
     row["next_operation"] = next_op
     row["model_variant"] = model_variant
     row["process_time"] = float(process_time)
-    row["loading_unloading"] = float(loading if loading is not None else 10)
+    # CT = standard cycle time only (mold change time is not added on the planning form)
+    row["loading_unloading"] = float(loading if loading is not None else 0)
     return row
 
 
