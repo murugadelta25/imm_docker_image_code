@@ -4,7 +4,9 @@ import api from '../api/client';
 import PageHeader from '../components/PageHeader';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
-import { useConfig, getCurrentShift, timeToMinutes, isMobileIntegrationEnabled } from '../context/ConfigContext';
+import { useConfig, getCurrentShift, timeToMinutes, isMobileIntegrationEnabled, isManualDataEntryEnabled } from '../context/ConfigContext';
+import { useAuth } from '../context/AuthContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { parseCtSeconds, sumCt, formatCtSeconds, isValidDecimalInput } from '../utils/cycleTime';
 import { planModelVariant } from '../utils/partVariant';
 import { DRAFT_KEYS } from '../utils/formPersistence';
@@ -85,8 +87,11 @@ function pickBestPlan(plans, machineId) {
 }
 
 export default function DataEntry() {
+  const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { config } = useConfig();
   const mobileCoupled = isMobileIntegrationEnabled(config);
+  const manualEntry = isManualDataEntryEnabled(config);
   const currentShift = useMemo(() => getCurrentShift(config), [config]);
 
   const [activeShift, setActiveShift] = useState(currentShift || config.shifts.find(s => s.enabled));
@@ -349,9 +354,13 @@ export default function DataEntry() {
   const { theme: t } = useTheme();
   const s = getStyles(t);
 
-  // Check for missing shift data alerts — only when token is present
+  // Missing-shift alerts — only when Manual data entry is enabled
   useEffect(() => {
     if (!localStorage.getItem('token')) return;
+    if (!manualEntry) {
+      setAlerts([]);
+      return;
+    }
     const checkMissing = async () => {
       const newAlerts = [];
       
@@ -401,7 +410,7 @@ export default function DataEntry() {
       setAlerts(newAlerts);
     };
     checkMissing();
-  }, [config.shifts, config.checkDataDaysBack, currentShift]);
+  }, [config.shifts, config.checkDataDaysBack, currentShift, manualEntry]);
 
   // When shift changes, update break defaults but keep user-modified values if they differ
   const handleShiftChange = (shiftId) => {
@@ -486,11 +495,21 @@ export default function DataEntry() {
     return hhmm >= shiftEnd;
   };
 
-  const entryEnabled = isShiftEnabled(form.shift, form.entry_date);
+  const shiftEntryOpen = isShiftEnabled(form.shift, form.entry_date);
+  const entryEnabled = manualEntry && shiftEntryOpen;
+  const canSubmit = canAccess('capability.edit_data_entry', user?.role);
 
   const handleSubmit = async e => {
     e.preventDefault();
-    if (!entryEnabled) { setMsg('✗ Data entry not yet enabled for this shift'); return; }
+    if (!canSubmit) {
+      setMsg('✗ View-only — your role cannot submit data entry');
+      return;
+    }
+    if (!manualEntry) {
+      setMsg('✗ Manual data entry is disabled — switch to Manual mode in Configuration');
+      return;
+    }
+    if (!shiftEntryOpen) { setMsg('✗ Data entry not yet enabled for this shift'); return; }
     try {
       // Only send OEECreate schema fields — backend computes accp_qty and all derived values
       const payload = {
@@ -536,7 +555,14 @@ export default function DataEntry() {
         <div key={i} style={s.alert}>⚠ {a}</div>
       ))}
 
-      {!entryEnabled && (
+      {!manualEntry && (
+        <div style={s.warnBanner}>
+          Auto capturing is active — production data comes from live machine status.
+          Manual Data Entry is disabled. To enter shifts by hand, open Configuration → Data Capture Mode → Manual data entry.
+        </div>
+      )}
+
+      {manualEntry && !shiftEntryOpen && (
         <div style={s.warnBanner}>
           ⏳ Data entry for Shift {form.shift} is not yet enabled. It will be available once the shift ends.
         </div>

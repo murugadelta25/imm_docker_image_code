@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import PageHeader from '../components/PageHeader';
+import FeatureAccessMatrix from '../components/FeatureAccessMatrix';
 
 const ROLES = ['superadmin', 'admin', 'supervisor', 'operator', 'maintenance', 'quality'];
 
@@ -385,51 +386,8 @@ export default function UserManagement() {
         </div>
       </div>
 
-      {/* Access Matrix */}
-      <div style={s.card}>
-        <h4 style={s.cardTitle}>📋 Feature Access Matrix</h4>
-        <div style={{ overflowX: 'auto' }}>
-          <table style={s.table}>
-            <thead>
-              <tr>
-                <th style={s.th}>Feature</th>
-                {ROLES.map(r => (
-                  <th key={r} style={{ ...s.th, color: ROLE_CFG[r].color, textAlign: 'center' }}>
-                    {ROLE_CFG[r].icon} {ROLE_CFG[r].label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {[
-                { feature: 'View Dashboard',         admin: true,  supervisor: true,  operator: true,  maintenance: true  },
-                { feature: 'Production Planning',    admin: true,  supervisor: true,  operator: true,  maintenance: false },
-                { feature: 'Data Entry',             admin: true,  supervisor: true,  operator: true,  maintenance: false },
-                { feature: 'Model Change Request',   admin: true,  supervisor: true,  operator: true,  maintenance: false },
-                { feature: 'Approve Model Change',   admin: true,  supervisor: true,  operator: false, maintenance: false },
-                { feature: 'Raise Breakdown Ticket', admin: true,  supervisor: true,  operator: true,  maintenance: false },
-                { feature: 'Acknowledge Breakdown',  admin: true,  supervisor: false, operator: false, maintenance: true  },
-                { feature: 'Resolve Breakdown',      admin: true,  supervisor: false, operator: false, maintenance: true  },
-                { feature: 'Email Alerts Config',    admin: true,  supervisor: true,  operator: false, maintenance: false },
-                { feature: 'Machine Configuration',  admin: true,  supervisor: true,  operator: false, maintenance: false },
-                { feature: 'User Management',        admin: true,  supervisor: false, operator: false, maintenance: false },
-                { feature: 'System Configuration',   admin: true,  supervisor: false, operator: false, maintenance: false },
-              ].map(row => (
-                <tr key={row.feature}>
-                  <td style={{ ...s.td, fontWeight: 500, color: t.text }}>{row.feature}</td>
-                  {ROLES.map(r => (
-                    <td key={r} style={{ ...s.td, textAlign: 'center' }}>
-                      {row[r]
-                        ? <span style={{ color: '#10b981', fontSize: 16 }}>✓</span>
-                        : <span style={{ color: t.textFaint, fontSize: 14 }}>—</span>}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {/* Access Matrix — editable (PMS parity) */}
+      <FeatureAccessMatrix onFlash={flash} />
     </div>
   );
 }

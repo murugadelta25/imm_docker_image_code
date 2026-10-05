@@ -36,7 +36,8 @@ def all_feature_item_ids() -> list[str]:
             ids.append(item["id"])
     for group in registry_groups():
         for item in group.get("items") or []:
-            ids.append(item["id"])
+            if not item.get("alwaysEnabled"):
+                ids.append(item["id"])
     return ids
 
 

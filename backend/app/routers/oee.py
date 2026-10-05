@@ -11,7 +11,7 @@ from ..models import (
     OEEEntry, OEEDefectLog, Machine, Station, ProductionPlan,
     WorkOrder, MachineStatusLog, SiteConfig, get_db, now_ist,
 )
-from ..auth import get_current_user
+from ..auth import get_current_user, require_capability
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -359,7 +359,11 @@ def calculate_oee(data: OEECreate) -> dict:
     }
 
 @router.post("/")
-def create_entry(data: OEECreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+def create_entry(
+    data: OEECreate,
+    db: Session = Depends(get_db),
+    user=Depends(require_capability("capability.edit_data_entry", "operator", "supervisor", "admin")),
+):
     from ..models import ProductionPlan
     calc = calculate_oee(data)
     # Only store raw values when capping actually occurred

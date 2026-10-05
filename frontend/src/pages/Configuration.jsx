@@ -68,6 +68,7 @@ export default function Configuration() {
           hourly_output: config.hourly_output ?? latest?.hourly_output,
           backup: config.backup ?? latest?.backup,
           mobile_integration: config.mobile_integration ?? latest?.mobile_integration,
+          data_capture: config.data_capture ?? latest?.data_capture,
         };
       } catch { /* proceed with local config */ }
 
@@ -79,6 +80,7 @@ export default function Configuration() {
         ...(preserved.hourly_output != null ? { hourly_output: preserved.hourly_output } : {}),
         ...(preserved.backup ? { backup: preserved.backup } : {}),
         ...(preserved.mobile_integration ? { mobile_integration: preserved.mobile_integration } : {}),
+        ...(preserved.data_capture ? { data_capture: preserved.data_capture } : {}),
       };
 
       await api.put('/api/config/', { config: payload });
@@ -188,13 +190,78 @@ export default function Configuration() {
         <button style={s.addBtn} onClick={addShift}>+ Add Shift</button>
       </Section>
 
+      <Section title="Data Capture Mode">
+        <div style={{
+          display: 'flex', flexDirection: 'column', gap: 12,
+          padding: '12px 14px', borderRadius: 8,
+          border: `1px solid ${t.border}`,
+          background: t.surface2 || t.inp,
+        }}>
+          <p style={{ color: t.textMuted, fontSize: 12, margin: 0, lineHeight: 1.45 }}>
+            Choose how production quantities are recorded. Auto mode uses live machine status
+            capture — missing-shift reminders are off. Manual mode enables Data Entry and shows
+            a reminder when the previous day&apos;s prior shift has no entries.
+          </p>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {[
+              { id: 'auto', label: 'Auto capturing', desc: 'Live PLC / status capture (default)' },
+              { id: 'manual', label: 'Manual data entry', desc: 'Operators enter shift data in Data Entry' },
+            ].map((opt) => {
+              const active = (config.data_capture?.mode || 'auto') === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setConfig((prev) => ({
+                    ...prev,
+                    data_capture: { ...(prev.data_capture || {}), mode: opt.id },
+                  }))}
+                  style={{
+                    flex: '1 1 200px', textAlign: 'left', cursor: 'pointer',
+                    padding: '12px 14px', borderRadius: 8,
+                    border: `2px solid ${active ? t.accent : t.border}`,
+                    background: active ? `${t.accent}18` : t.surface,
+                    color: t.text,
+                  }}
+                >
+                  <span style={{ fontWeight: 700, fontSize: 13, display: 'block' }}>{opt.label}</span>
+                  <span style={{ color: t.textMuted, fontSize: 11, display: 'block', marginTop: 4 }}>{opt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+          <span style={{
+            alignSelf: 'flex-start', padding: '6px 12px', borderRadius: 20,
+            fontSize: 12, fontWeight: 800, letterSpacing: 0.4,
+            background: (config.data_capture?.mode || 'auto') === 'manual' ? '#f59e0b33' : '#10b98133',
+            color: (config.data_capture?.mode || 'auto') === 'manual' ? '#f59e0b' : '#10b981',
+            border: `1px solid ${(config.data_capture?.mode || 'auto') === 'manual' ? '#f59e0b55' : '#10b98155'}`,
+          }}>
+            {(config.data_capture?.mode || 'auto') === 'manual' ? 'MANUAL ENTRY' : 'AUTO CAPTURE'}
+          </span>
+        </div>
+      </Section>
+
       <Section title="Data Validation Settings">
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
-          <label style={{ color: t.textMuted, fontSize: 13 }}>Check previous shift data for past N days:</label>
+          <label style={{
+            color: t.textMuted, fontSize: 13,
+            opacity: (config.data_capture?.mode || 'auto') === 'manual' ? 1 : 0.45,
+          }}>
+            Check previous shift data for past N days:
+          </label>
           <input style={{ ...s.inp, width: 60 }} type="number" min="1" max="30"
+            disabled={(config.data_capture?.mode || 'auto') !== 'manual'}
             value={config.checkDataDaysBack ?? 1}
             onChange={e => setConfig(prev => ({ ...prev, checkDataDaysBack: Math.max(1, parseInt(e.target.value) || 1) }))} />
-          <span style={{ color: t.textDim, fontSize: 12 }}>(default: 1 day)</span>
+          <span style={{
+            color: t.textDim, fontSize: 12,
+            opacity: (config.data_capture?.mode || 'auto') === 'manual' ? 1 : 0.45,
+          }}>
+            {(config.data_capture?.mode || 'auto') === 'manual'
+              ? '(applies to missing-shift reminders; default: 1 day)'
+              : '(only used when Manual data entry is selected)'}
+          </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
           <label style={{ color: t.textMuted, fontSize: 13 }}>Running part threshold (% of process time):</label>

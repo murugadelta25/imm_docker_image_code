@@ -25,9 +25,9 @@ export default function Sidebar({ expanded = true }) {
     return () => window.cancelAnimationFrame(id);
   }, []);
 
-  const { modules } = useFeatureFlags();
+  const { modules, roleAccess } = useFeatureFlags();
   const toggleGroup = (g) => setOpenGroups((p) => ({ ...p, [g]: !p[g] }));
-  const MENU = getNavigationForRole(user?.role, modules);
+  const MENU = getNavigationForRole(user?.role, modules, roleAccess);
 
   const navWidth = expanded ? 'var(--titan-nav-width)' : '0px';
   const accentNav = t.navStyle === 'accent';

@@ -53,6 +53,10 @@ DEFAULT_CONFIG = {
         },
     },
     "checkDataDaysBack": 1,
+    # auto = live PLC/status capture (default); manual = Data Entry form + missing-shift alerts
+    "data_capture": {
+        "mode": "auto",
+    },
     "hourly_output": {
         "running_part_threshold_pct": 30,
         "ld_unld_max_sec": 60,
@@ -166,6 +170,12 @@ def merge_config(stored: dict) -> dict:
     mi = stored.get("mobile_integration") or {}
     default_mi = DEFAULT_CONFIG["mobile_integration"]
     merged["mobile_integration"] = {**default_mi, **mi}
+    dc = stored.get("data_capture") if isinstance(stored.get("data_capture"), dict) else {}
+    default_dc = DEFAULT_CONFIG["data_capture"]
+    mode = dc.get("mode", default_dc["mode"])
+    if mode not in ("auto", "manual"):
+        mode = default_dc["mode"]
+    merged["data_capture"] = {**default_dc, **dc, "mode": mode}
     return merged
 
 
@@ -296,7 +306,9 @@ def save_config(payload: ConfigPayload, db: Session = Depends(get_db), _=Depends
         "factory",
         "backup",
         "featureModules",
+        "featureRoleAccess",
         "mobile_integration",
+        "data_capture",
     )
     for key in preserve_keys:
         if key not in incoming or incoming.get(key) in (None, {}):
@@ -317,6 +329,18 @@ def save_config(payload: ConfigPayload, db: Session = Depends(get_db), _=Depends
             **(existing.get("mobile_integration") or {}),
             **incoming["mobile_integration"],
         }
+
+    if isinstance(incoming.get("data_capture"), dict):
+        dc_in = {
+            **DEFAULT_CONFIG["data_capture"],
+            **(existing.get("data_capture") or {}),
+            **incoming["data_capture"],
+        }
+        mode = dc_in.get("mode", "auto")
+        if mode not in ("auto", "manual"):
+            mode = "auto"
+        dc_in["mode"] = mode
+        incoming["data_capture"] = dc_in
 
     if isinstance(incoming.get("factory"), dict):
         # Merge draft logos from upload onto named factories, then prune stubs.

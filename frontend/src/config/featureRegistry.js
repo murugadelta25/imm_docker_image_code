@@ -17,7 +17,9 @@ export function resolveNavIcon(key) {
   return ICON_MAP[key] ?? null;
 }
 
-/** All toggleable feature item ids (excludes alwaysEnabled standalone and group items). */
+const TOGGLEABLE_ROLES = ['superadmin', 'admin', 'site_admin', 'supervisor', 'operator', 'maintenance', 'quality'];
+
+/** All toggleable feature item ids (excludes alwaysEnabled standalone). */
 export function getAllFeatureItemIds() {
   const ids = [];
   for (const item of FEATURE_REGISTRY.standalone || []) {
@@ -33,6 +35,63 @@ export function getAllFeatureItemIds() {
 
 export function getDefaultFeatureModules() {
   return Object.fromEntries(getAllFeatureItemIds().map(id => [id, true]));
+}
+
+function findRegistryItem(featureId) {
+  if (!featureId) return null;
+  for (const item of FEATURE_REGISTRY.standalone || []) {
+    if (item.id === featureId) return item;
+  }
+  for (const group of FEATURE_REGISTRY.groups || []) {
+    for (const item of group.items || []) {
+      if (item.id === featureId) return item;
+    }
+  }
+  return null;
+}
+
+/** Default role map from registry (true only for listed roles). Site Admin follows Admin. */
+export function getDefaultFeatureRoleAccess() {
+  const out = {};
+  for (const item of FEATURE_REGISTRY.standalone || []) {
+    if (item.alwaysEnabled) continue;
+    const allowed = new Set(item.roles || TOGGLEABLE_ROLES);
+    out[item.id] = Object.fromEntries(
+      TOGGLEABLE_ROLES.map((r) => [r, allowed.has(r) || (r === 'site_admin' && allowed.has('admin'))]),
+    );
+  }
+  for (const group of FEATURE_REGISTRY.groups || []) {
+    for (const item of group.items || []) {
+      if (item.alwaysEnabled) continue;
+      const allowed = new Set(item.roles || group.roles || []);
+      out[item.id] = Object.fromEntries(
+        TOGGLEABLE_ROLES.map((r) => [r, allowed.has(r) || (r === 'site_admin' && allowed.has('admin'))]),
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a role may see a feature (module must also be enabled).
+ * roleAccess overrides registry defaults when provided by the API.
+ */
+export function canRoleAccessFeature(featureId, role, modules, roleAccess) {
+  if (!featureId) return true;
+  const item = findRegistryItem(featureId);
+  if (item?.alwaysEnabled) return isFeatureEnabled(featureId, modules);
+  if (!isFeatureEnabled(featureId, modules)) return false;
+  if (!role) return false;
+  const access = roleAccess?.[featureId];
+  if (access && typeof access === 'object') {
+    if (role in access) return access[role] === true;
+    if (role === 'site_admin' && access.admin === true) return true;
+    if (String(featureId).startsWith('capability.')) return false;
+  }
+  if (!item?.roles) return role === 'superadmin' || role === 'admin' || role === 'site_admin';
+  if (item.roles.includes(role)) return true;
+  if (role === 'site_admin' && item.roles.includes('admin')) return true;
+  return false;
 }
 
 /** Path → feature item id (longest match). alwaysEnabled routes return null (never blocked). */
@@ -67,23 +126,45 @@ export function isFeatureEnabled(featureId, modules) {
   return flags[featureId] !== false;
 }
 
-export function isRouteEnabled(pathname, modules) {
-  return isFeatureEnabled(pathToFeatureId(pathname), modules);
+export function isRouteEnabled(pathname, modules, role, roleAccess) {
+  const featureId = pathToFeatureId(pathname);
+  if (!featureId) return true;
+  if (role != null || roleAccess != null) {
+    return canRoleAccessFeature(featureId, role, modules, roleAccess);
+  }
+  return isFeatureEnabled(featureId, modules);
 }
 
 /**
  * Build sidebar navigation from registry + role + feature flags.
- * @param {string | undefined} role
- * @param {Record<string, boolean> | undefined} modules
  */
-export function buildNavigation(role, modules) {
-  const canSee = roles => !roles || roles.includes(role);
-  const itemEnabled = id => isFeatureEnabled(id, modules);
+export function buildNavigation(role, modules, roleAccess) {
+  const itemVisible = (id, itemRoles) => {
+    if (roleAccess && typeof roleAccess === 'object') {
+      return canRoleAccessFeature(id, role, modules, roleAccess);
+    }
+    if (itemRoles && !itemRoles.includes(role) && !(role === 'site_admin' && itemRoles.includes('admin'))) {
+      return false;
+    }
+    return isFeatureEnabled(id, modules);
+  };
   const sections = [];
 
   for (const item of FEATURE_REGISTRY.standalone || []) {
-    if (!canSee(item.roles)) continue;
-    if (!item.alwaysEnabled && !itemEnabled(item.id)) continue;
+    if (item.hideFromNav) continue;
+    if (item.alwaysEnabled) {
+      sections.push({
+        group: null,
+        items: [{
+          path: item.path,
+          label: item.label,
+          icon: resolveNavIcon(item.navIcon),
+          featureId: item.id,
+        }],
+      });
+      continue;
+    }
+    if (!itemVisible(item.id, item.roles)) continue;
     sections.push({
       group: null,
       items: [{
@@ -96,10 +177,11 @@ export function buildNavigation(role, modules) {
   }
 
   for (const group of FEATURE_REGISTRY.groups || []) {
-    if (!canSee(group.roles)) continue;
     const items = (group.items || [])
-      .filter(item => canSee(item.roles))
-      .filter(item => item.alwaysEnabled || itemEnabled(item.id))
+      .filter(item => {
+        if (item.alwaysEnabled) return true;
+        return itemVisible(item.id, item.roles || group.roles);
+      })
       .map(item => ({
         path: item.path,
         label: item.label,
@@ -118,6 +200,17 @@ export function buildNavigation(role, modules) {
   }
 
   return sections;
+}
+
+/** First sidebar path the role may open (used when a forbidden URL is requested). */
+export function firstAllowedPath(role, modules, roleAccess) {
+  const nav = buildNavigation(role, modules, roleAccess);
+  for (const section of nav) {
+    for (const item of section.items || []) {
+      if (item.path) return item.path;
+    }
+  }
+  return '/dashboard';
 }
 
 /** Group helpers for platform admin UI */
