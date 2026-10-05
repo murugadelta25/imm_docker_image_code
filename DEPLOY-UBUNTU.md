@@ -1,17 +1,17 @@
-# EAP PMS — Ubuntu Deployment
+﻿# EAP PMS â€” Ubuntu Deployment
 
 Deploy on Ubuntu IPC/server using **git clone** (recommended) or a **zip package** from Windows.
 
-**Repository:** https://github.com/murugadelta25/Groz_eap_pms.git
+**Repository:** https://github.com/murugadelta25/eap_imm_pms.git
 
-## Ports
+## Ports (IMM â€” do not use PMS 5173 / 8030)
 
 | Service  | Port |
 |----------|------|
-| Backend  | 8010 |
+| Backend  | 8040 |
 | Frontend | 5174 |
 
-## Option A — Git clone on Ubuntu (recommended for IPC server)
+## Option A â€” Git clone on Ubuntu (recommended for IPC server)
 
 On the Ubuntu IPC/server:
 
@@ -20,11 +20,11 @@ On the Ubuntu IPC/server:
 sudo apt update && sudo apt install -y git
 
 # Clone (or update) the repository
-git clone https://github.com/murugadelta25/Groz_eap_pms.git
-cd Groz_eap_pms
+git clone https://github.com/murugadelta25/eap_imm_pms.git
+cd eap_imm_pms
 
 # First deploy
-chmod +x run.sh scripts/*.sh
+chmod +x run.sh scripts/*.sh start.sh
 ./run.sh
 
 # Later updates (pull latest code and restart)
@@ -41,7 +41,7 @@ nano deploy.env   # CLIENT_NAME, DB_PASS, DB_NAME
 
 See [DOMAIN-SETUP.md](DOMAIN-SETUP.md) for `din.eappms` DNS and nginx.
 
-## Option B — Zip package from Windows
+## Option B â€” Zip package from Windows
 
 ## 1. Create the package (Windows)
 
@@ -130,7 +130,7 @@ Services auto-start on boot after the first `./run.sh`.
 - **Standard URL:** `http://din.eappms` (configured automatically by `./run.sh` via nginx)
 - **API docs:** `http://din.eappms/docs`
 - **Fallback:** `http://<server-ip>:5174`
-- **DNS:** Ask IT for `din.eappms` A → server IP (see `DOMAIN-SETUP.md`)
+- **DNS:** Ask IT for `din.eappms` A â†’ server IP (see `DOMAIN-SETUP.md`)
 
 ### Embed mode (CPLM integration)
 
@@ -153,29 +153,29 @@ App bar shows **Nav On/Off** toggle in integration mode.
 Default users (from `database/schema.sql` / seed):
 
 - `operator1` / `op123`
-- `admin` — check schema seed for password hash
+- `admin` â€” check schema seed for password hash
 
 ## 7. Firewall
 
-If UFW is enabled, ports 8010 and 5174 are opened automatically during dependency install.
+If UFW is enabled, ports 8040 and 5174 are opened automatically during dependency install.
 
 ```bash
 sudo ufw allow 5174/tcp
-sudo ufw allow 8010/tcp
+sudo ufw allow 8040/tcp
 ```
 
 ## Files included in package
 
 ```
 eap-pms/
-├── backend/          # FastAPI app
-├── frontend/         # React + Vite
-├── database/         # schema.sql, migrations, examples
-├── scripts/          # install-deps, setup-database, install-systemd
-├── run.sh            # main launcher
-├── deploy.sh         # wrapper → run.sh
-├── deploy.env.example
-└── DEPLOY-UBUNTU.md
+â”œâ”€â”€ backend/          # FastAPI app
+â”œâ”€â”€ frontend/         # React + Vite
+â”œâ”€â”€ database/         # schema.sql, migrations, examples
+â”œâ”€â”€ scripts/          # install-deps, setup-database, install-systemd
+â”œâ”€â”€ run.sh            # main launcher
+â”œâ”€â”€ deploy.sh         # wrapper â†’ run.sh
+â”œâ”€â”€ deploy.env.example
+â””â”€â”€ DEPLOY-UBUNTU.md
 ```
 
 ## Troubleshooting
@@ -187,7 +187,7 @@ sudo journalctl -u titan-backend -n 50
 tail -f backend.log
 ```
 
-Check `backend/.env` — `DATABASE_URL` must match your MySQL user/password.
+Check `backend/.env` â€” `DATABASE_URL` must match your MySQL user/password.
 
 **Frontend won't start**
 
@@ -211,13 +211,13 @@ Or run `./run.sh restart` after copying the updated `scripts/` and `run.sh` from
 
 **API returns 500 (`/api/config/branding`, `/api/auth/login`)**
 
-`/health` can pass while the database is misconfigured — API routes need MySQL. Usually `backend/.env` has a stale `DATABASE_URL` (wrong database name or password).
+`/health` can pass while the database is misconfigured â€” API routes need MySQL. Usually `backend/.env` has a stale `DATABASE_URL` (wrong database name or password).
 
 ```bash
 # Diagnose
-curl -s http://localhost:8010/health
-curl -s http://localhost:8010/health/db
-curl -s http://localhost:8010/api/config/branding
+curl -s http://localhost:8040/health
+curl -s http://localhost:8040/health/db
+curl -s http://localhost:8040/api/config/branding
 grep DATABASE_URL backend/.env
 cat database/db.config.json
 
@@ -236,7 +236,7 @@ Path("backend/.env").write_text("\n".join(out) + "\n")
 print("Updated:", url)
 PY
 sudo systemctl restart groz-backend
-curl -s http://localhost:8010/health/db
+curl -s http://localhost:8040/health/db
 ```
 
 Default login after seed: `operator1` / `op123` (not `opt123`).
@@ -249,3 +249,4 @@ mysql -u root -p -e "SHOW DATABASES;"
 ```
 
 Update `deploy.env` and `backend/.env`, then `./run.sh restart`.
+

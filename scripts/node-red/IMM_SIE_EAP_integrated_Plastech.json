@@ -1,10 +1,10 @@
-[
+﻿[
   {
     "id": "25db418d496ffe93",
     "type": "tab",
     "label": "IMM SIE -> EAP API",
     "disabled": false,
-    "info": "# IMM SIE EDA -> EAP IMM PMS (PUSH)\n\nIncludes IMM_07..IMM_11 plus **PLC_Plastech** (IMM17 / IMM18 status + plant energy meter).\n\n**Shot counting (Node-RED):** Normalize & store runs a per-machine FSM and pushes `EAP_Shot_Event=1` when a shot completes \u2014 EAP only records the event (light).\n- OPCUA: Actual_Injection_Time \u2192 Actual_Charging_Time \u2192 Actual_Production_Count (separate msgs)\n- IMM17/18: Injection_Status true \u2192 Refilling_Status true (separate msgs)\n\n## Configure\n1. Inject **1 Set EAP webhook URL**\n2. Inject **2 Set machine fleet map** (IMM17\u21923, IMM18\u21924)\n3. Inject **3 Set energy meter targets** (default EM_PLANT \u2014 not tied to IMM machines)\n4. Deploy\n\n## Energy meter\nPlant energy (PF / V / I / totals) is pushed as **EM_PLANT**. Map that source to any panel in the Energy Meter dashboard.\n\n## Throttle\nDefault: max **1 push / 10 seconds / machine** (energy gated separately), skip unchanged payloads.\n\nDo NOT use :5184 for webhook (frontend only)."
+    "info": "# IMM SIE EDA -> EAP IMM PMS (PUSH)\n\nIncludes IMM_07..IMM_11 plus **PLC_Plastech** (IMM17 / IMM18 status + plant energy meter).\n\n**Shot counting (Node-RED):** Normalize & store runs a per-machine FSM and pushes `EAP_Shot_Event=1` when a shot completes \u2014 EAP only records the event (light).\n- OPCUA: Actual_Injection_Time \u2192 Actual_Charging_Time \u2192 Actual_Production_Count (separate msgs)\n- IMM17/18: Injection_Status true \u2192 Refilling_Status true (separate msgs)\n\n## Configure\n1. Inject **1 Set EAP webhook URL**\n2. Inject **2 Set machine fleet map** (IMM17\u21923, IMM18\u21924)\n3. Inject **3 Set energy meter targets** (default EM_PLANT \u2014 not tied to IMM machines)\n4. Deploy\n\n## Energy meter\nPlant energy (PF / V / I / totals) is pushed as **EM_PLANT**. Map that source to any panel in the Energy Meter dashboard.\n\n## Throttle\nDefault: max **1 push / 10 seconds / machine** (energy gated separately), skip unchanged payloads.\n\nDo NOT use :5174 for webhook (frontend only)."
   },
   {
     "id": "28778a3f76848bc9",
@@ -35,7 +35,7 @@
     "once": true,
     "onceDelay": "1",
     "topic": "eap_config",
-    "payload": "{\"webhook_url\": \"http://192.168.1.110/api/imm/nodered/webhook/push\", \"webhook_secret\": \"\", \"push_min_interval_ms\": 10000, \"push_on_change_only\": true}",
+    "payload": "{\"webhook_url\": \"http://192.168.1.111:8040/api/imm/nodered/webhook/push\", \"webhook_secret\": \"\", \"push_min_interval_ms\": 10000, \"push_on_change_only\": true}",
     "payloadType": "json",
     "x": 200,
     "y": 720,
@@ -64,7 +64,7 @@
     "once": false,
     "onceDelay": 0.1,
     "topic": "eap_config",
-    "payload": "{\"webhook_url\": \"http://192.168.1.110/api/imm/nodered/webhook/push\", \"webhook_secret\": \"\", \"push_min_interval_ms\": 10000, \"push_on_change_only\": true}",
+    "payload": "{\"webhook_url\": \"http://192.168.1.111:8040/api/imm/nodered/webhook/push\", \"webhook_secret\": \"\", \"push_min_interval_ms\": 10000, \"push_on_change_only\": true}",
     "payloadType": "json",
     "x": 210,
     "y": 760,
@@ -79,7 +79,7 @@
     "type": "function",
     "z": "25db418d496ffe93",
     "name": "Save EAP config -> global",
-    "func": "const cfg = msg.payload || {};\n\nif (cfg.webhook_url) {\n  const url = String(cfg.webhook_url).trim().replace(/\\/+$/, '');\n  global.set('EAP_WEBHOOK_URL', url);\n}\nif (cfg.webhook_secret !== undefined) {\n  global.set('EAP_WEBHOOK_SECRET', String(cfg.webhook_secret || ''));\n}\nif (cfg.eap_host) global.set('EAP_HOST', String(cfg.eap_host).trim());\nif (cfg.eap_port) global.set('EAP_PORT', String(cfg.eap_port).trim());\nif (cfg.use_port80 === true) {\n  const host = cfg.eap_host || global.get('EAP_HOST') || '192.168.1.110';\n  global.set('EAP_WEBHOOK_URL', `http://${host}/api/imm/nodered/webhook/push`);\n}\n\nconst interval = Number(cfg.push_min_interval_ms);\nglobal.set('EAP_PUSH_MIN_INTERVAL_MS', Number.isFinite(interval) && interval >= 0 ? interval : 10000);\nglobal.set('EAP_PUSH_ON_CHANGE_ONLY', cfg.push_on_change_only !== false);\n\nconst active = global.get('EAP_WEBHOOK_URL') || '(host/port fallback)';\nconst thr = global.get('EAP_PUSH_MIN_INTERVAL_MS') + 'ms change=' + global.get('EAP_PUSH_ON_CHANGE_ONLY');\nnode.status({ fill: 'blue', shape: 'ring', text: active + ' | ' + thr });\nnode.warn('EAP webhook URL set: ' + active + ' throttle=' + thr);\nreturn null;",
+    "func": "const cfg = msg.payload || {};\n\nif (cfg.webhook_url) {\n  const url = String(cfg.webhook_url).trim().replace(/\\/+$/, '');\n  global.set('EAP_WEBHOOK_URL', url);\n}\nif (cfg.webhook_secret !== undefined) {\n  global.set('EAP_WEBHOOK_SECRET', String(cfg.webhook_secret || ''));\n}\nif (cfg.eap_host) global.set('EAP_HOST', String(cfg.eap_host).trim());\nif (cfg.eap_port) global.set('EAP_PORT', String(cfg.eap_port).trim());\nif (cfg.use_port80 === true) {\n  const host = cfg.eap_host || global.get('EAP_HOST') || '192.168.1.111';\n  global.set('EAP_WEBHOOK_URL', `http://${host}/api/imm/nodered/webhook/push`);\n}\n\nconst interval = Number(cfg.push_min_interval_ms);\nglobal.set('EAP_PUSH_MIN_INTERVAL_MS', Number.isFinite(interval) && interval >= 0 ? interval : 10000);\nglobal.set('EAP_PUSH_ON_CHANGE_ONLY', cfg.push_on_change_only !== false);\n\nconst active = global.get('EAP_WEBHOOK_URL') || '(host/port fallback)';\nconst thr = global.get('EAP_PUSH_MIN_INTERVAL_MS') + 'ms change=' + global.get('EAP_PUSH_ON_CHANGE_ONLY');\nnode.status({ fill: 'blue', shape: 'ring', text: active + ' | ' + thr });\nnode.warn('EAP webhook URL set: ' + active + ' throttle=' + thr);\nreturn null;",
     "outputs": 0,
     "noerr": 0,
     "initialize": "",
@@ -280,7 +280,7 @@
     "type": "function",
     "z": "25db418d496ffe93",
     "name": "Prepare EAP push",
-    "func": "const WEBHOOK_URL = global.get('EAP_WEBHOOK_URL');\nconst WEBHOOK_SECRET = global.get('EAP_WEBHOOK_SECRET') || '';\n\nlet url = WEBHOOK_URL;\nif (!url) {\n  const host = global.get('EAP_HOST') || '192.168.1.110';\n  const port = global.get('EAP_PORT') || '8040';\n  url = `http://${host}:${port}/api/imm/nodered/webhook/push`;\n}\n\nmsg.method = 'POST';\nmsg.url = url;\nmsg.headers = { 'Content-Type': 'application/json' };\nif (WEBHOOK_SECRET) {\n  msg.headers['X-Webhook-Secret'] = WEBHOOK_SECRET;\n}\nreturn msg;",
+    "func": "const WEBHOOK_URL = global.get('EAP_WEBHOOK_URL');\nconst WEBHOOK_SECRET = global.get('EAP_WEBHOOK_SECRET') || '';\n\nlet url = WEBHOOK_URL;\nif (!url) {\n  const host = global.get('EAP_HOST') || '192.168.1.111';\n  const port = global.get('EAP_PORT') || '8040';\n  url = `http://${host}:${port}/api/imm/nodered/webhook/push`;\n}\n\nmsg.method = 'POST';\nmsg.url = url;\nmsg.headers = { 'Content-Type': 'application/json' };\nif (WEBHOOK_SECRET) {\n  msg.headers['X-Webhook-Secret'] = WEBHOOK_SECRET;\n}\nreturn msg;",
     "outputs": 1,
     "noerr": 0,
     "initialize": "",

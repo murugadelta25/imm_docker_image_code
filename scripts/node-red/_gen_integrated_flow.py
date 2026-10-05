@@ -644,7 +644,7 @@ def main():
                 "Map that source to any panel in the Energy Meter dashboard.\n\n"
                 "## Throttle\n"
                 "Default: max **1 push / 10 seconds / machine** (energy gated separately), skip unchanged payloads.\n\n"
-                "Do NOT use :5184 for webhook (frontend only)."
+                "Do NOT use :5174 for webhook (frontend only)."
             ),
         },
         {

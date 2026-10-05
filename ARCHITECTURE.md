@@ -1,4 +1,4 @@
-# EAP PMS — System Architecture Document
+﻿# EAP PMS â€” System Architecture Document
 
 **Product name:** EAP PMS (also branded **Titan OEE**)  
 **Document version:** 1.0  
@@ -52,7 +52,7 @@ The system follows a classic **three-tier architecture**:
 | Tier | Technology | Port |
 |------|------------|------|
 | Presentation | React 19 SPA (Vite) | 5174 |
-| Application | Python FastAPI | 8010 |
+| Application | Python FastAPI | 8040 |
 | Data | MySQL 8.x | 3306 |
 
 All business time calculations use **IST (Asia/Kolkata)** timezone.
@@ -75,7 +75,7 @@ flowchart TB
 
     subgraph EAP["EAP PMS System"]
         FE["React Frontend :5174"]
-        BE["FastAPI Backend :8010"]
+        BE["FastAPI Backend :8040"]
         DB[("MySQL eap_pms")]
         FS["Local File Storage"]
     end
@@ -111,8 +111,8 @@ flowchart TB
 | Charts | recharts | 3.8 | Dashboard and analytics visualizations |
 | Spreadsheets | xlsx | 0.18 | Client-side Excel import/export |
 | Dates | date-fns | 4.2 | Date formatting and manipulation |
-| Language | JavaScript (JSX) | — | No TypeScript in this project |
-| Styling | Custom CSS + JS themes | — | `cplm-layout.css`, `pmsThemes.js` |
+| Language | JavaScript (JSX) | â€” | No TypeScript in this project |
+| Styling | Custom CSS + JS themes | â€” | `cplm-layout.css`, `pmsThemes.js` |
 
 ### 3.2 Backend
 
@@ -161,24 +161,24 @@ flowchart TB
     end
 
     subgraph ViteServer["Vite Dev Server :5174"]
-        ProxyAPI["Proxy /api → :8010"]
-        ProxyStatic["Proxy /static → :8010"]
-        ProxyWS["Proxy /ws → :8010"]
+        ProxyAPI["Proxy /api â†’ :8040"]
+        ProxyStatic["Proxy /static â†’ :8040"]
+        ProxyWS["Proxy /ws â†’ :8040"]
     end
 
-    subgraph FastAPI["FastAPI Application :8010"]
+    subgraph FastAPI["FastAPI Application :8040"]
         direction TB
         Main["main.py\nlifespan + CORS + mounts"]
         Routers["REST Routers /api/*"]
         WSMgr["ws_manager.py\nConnectionManager"]
         Scheduler["scheduler_service.py\nAPScheduler"]
-        Services["Domain Services\nOEE · QC SPC · Deviation Alerts"]
+        Services["Domain Services\nOEE Â· QC SPC Â· Deviation Alerts"]
         StaticMount["StaticFiles /static"]
     end
 
     subgraph Persistence["Persistence"]
         MySQL[("MySQL\neap_pms")]
-        Files["backend/static/\nmachines · parts · work-instructions"]
+        Files["backend/static/\nmachines Â· parts Â· work-instructions"]
     end
 
     App --> Shell --> Pages
@@ -213,7 +213,7 @@ flowchart TD
     A["run.ps1"] --> B["Check MySQL connection"]
     B --> C["init_database.ps1\nCreate DB + apply schema"]
     C --> D["Write frontend/.env\n(empty VITE_API_URL = use proxy)"]
-    D --> E["Start uvicorn :8010\n(new PowerShell window)"]
+    D --> E["Start uvicorn :8040\n(new PowerShell window)"]
     E --> F["Poll /health until OK"]
     F --> G["npm run dev :5174\n(new PowerShell window)"]
     G --> H["Application ready\nhttp://localhost:5174"]
@@ -281,7 +281,7 @@ flowchart TB
     AuthShell --> AppShell["AppShell.jsx"]
     AppShell --> Sidebar["Sidebar.jsx"]
     AppShell --> AppBar["AppBar.jsx"]
-    AppShell --> Outlet["<Outlet /> → Feature Pages"]
+    AppShell --> Outlet["<Outlet /> â†’ Feature Pages"]
 ```
 
 ### 6.2 Provider Responsibilities
@@ -473,7 +473,7 @@ sequenceDiagram
 | `quality` | QC approvals, work instructions |
 | `admin` | Full access: users, machines, factory setup, configuration |
 
-**Enforcement:** Navigation filtered in `navigation.jsx` → `getNavigationForRole()`. API endpoints use `require_role('admin', 'supervisor', ...)`.
+**Enforcement:** Navigation filtered in `navigation.jsx` â†’ `getNavigationForRole()`. API endpoints use `require_role('admin', 'supervisor', ...)`.
 
 ---
 
@@ -492,7 +492,7 @@ sequenceDiagram
     P->>X: api.get('/api/oee?date=...')
     X->>X: Attach Bearer token
     X->>V: HTTP GET /api/oee
-    V->>F: Forward to :8010
+    V->>F: Forward to :8040
     F->>Auth: get_current_user(token)
     Auth->>DB: Load user by username from JWT
     Auth-->>F: User object
@@ -535,10 +535,10 @@ sequenceDiagram
     Note over R,M: State change occurs
     R->>M: await manager.broadcast({type: 'plan_updated', ...})
     M->>H: JSON message to all clients
-    H->>P: onMessage(data) → re-fetch or update UI
+    H->>P: onMessage(data) â†’ re-fetch or update UI
 
     Note over H: On disconnect
-    H->>H: Exponential backoff reconnect (3s → 30s max)
+    H->>H: Exponential backoff reconnect (3s â†’ 30s max)
 ```
 
 ### 10.2 Broadcast Event Types
@@ -646,10 +646,10 @@ flowchart TD
     A --> C["POST /api/oee"]
     C --> D["calculate_oee() in oee.py"]
     D --> E["Compute CT, breaks, losses,\noperating time, possible qty"]
-    E --> F["AR = operating / available × 100"]
-    E --> G["PR = actual / possible × 100"]
-    E --> H["QR = accepted / actual × 100"]
-    F & G & H --> I["OEE = AR × PR × QR / 10000"]
+    E --> F["AR = operating / available Ã— 100"]
+    E --> G["PR = actual / possible Ã— 100"]
+    E --> H["QR = accepted / actual Ã— 100"]
+    F & G & H --> I["OEE = AR Ã— PR Ã— QR / 10000"]
     I --> J["INSERT oee_entries"]
     J --> K["MySQL computes generated columns"]
     K --> L["Dashboard reads GET /api/oee/summary"]
@@ -665,12 +665,12 @@ Source of truth: `OEE-FORMULAS.txt` and `backend/app/routers/oee.py`.
 | Shift Working Min | `total_minutes - total_breaks` | minutes |
 | Available Shift Time | `shift_working - management_loss` | minutes |
 | Operating Time | `available - total_down_time` | minutes |
-| Possible Qty | `(operating_time × 60) / CT` | parts |
+| Possible Qty | `(operating_time Ã— 60) / CT` | parts |
 | Accepted Qty | `actual_qty - defect_qty` | parts |
-| AR | `operating / available × 100` | % |
-| PR | `actual / possible × 100` | % |
-| QR | `accepted / actual × 100` | % |
-| OEE | `AR × PR × QR / 10000` | % |
+| AR | `operating / available Ã— 100` | % |
+| PR | `actual / possible Ã— 100` | % |
+| QR | `accepted / actual Ã— 100` | % |
+| OEE | `AR Ã— PR Ã— QR / 10000` | % |
 
 ### 12.3 Defect Update Flow (Post-QC)
 
@@ -727,7 +727,7 @@ flowchart LR
 | Action | Endpoint | Effect |
 |--------|----------|--------|
 | Create plan | `POST /api/plans` | New row in `production_plans` |
-| Update status | `PATCH /api/plans/{id}/status` | pending → running → completed |
+| Update status | `PATCH /api/plans/{id}/status` | pending â†’ running â†’ completed |
 | Update actual | `PATCH /api/plans/{id}/actual` | Record actual production qty |
 | Reschedule | `POST /api/plans/{id}/reschedule` | Move to new date/shift/machine |
 | Bulk reschedule | `POST /api/plans/bulk-reschedule` | Move multiple plans |
@@ -769,16 +769,16 @@ sequenceDiagram
     API->>SPC: enrich_readings_with_part_limits()
     OP->>API: POST /{id}/submit-instance
     API->>API: recompute_report_status()
-    Note over API: Status → pending_inspector
+    Note over API: Status â†’ pending_inspector
     API-->>WI: Updated report
 
     Note over API: Inspector approves
     API->>API: POST /{id}/approve-inspector
-    Note over API: Status → pending_incharge
+    Note over API: Status â†’ pending_incharge
 
     Note over API: Incharge closes shift
     API->>API: POST /{id}/close-shift
-    Note over API: Status → closed
+    Note over API: Status â†’ closed
 ```
 
 **Key technical details:**
@@ -948,7 +948,7 @@ flowchart LR
 
 **Upload limits** enforced by `upload_limits.py` (e.g., image size caps).
 
-**Document types** for parts: `control_plan`, `wi_visual`, `wi_tray`, `breakdown_sheet` — with revision tracking and history in `part_document_history`.
+**Document types** for parts: `control_plan`, `wi_visual`, `wi_tray`, `breakdown_sheet` â€” with revision tracking and history in `part_document_history`.
 
 ---
 
@@ -958,21 +958,21 @@ flowchart LR
 
 ```
 run.ps1
-  ├── MySQL check (port 3306)
-  ├── database/init_database.ps1
-  ├── Backend: uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
-  └── Frontend: npm run dev (Vite :5174, proxy enabled)
+  â”œâ”€â”€ MySQL check (port 3306)
+  â”œâ”€â”€ database/init_database.ps1
+  â”œâ”€â”€ Backend: uvicorn app.main:app --host 0.0.0.0 --port 8040 --reload
+  â””â”€â”€ Frontend: npm run dev (Vite :5174, proxy enabled)
 ```
 
 ### 19.2 Production (Ubuntu)
 
 ```
-PACKAGE.ps1 → eap-pms.zip
-  └── Transfer to server
-        └── unzip + ./run.sh
-              ├── scripts/setup-database.sh
-              ├── Backend (uvicorn, no --reload)
-              └── Frontend (vite preview or built dist)
+PACKAGE.ps1 â†’ eap-pms.zip
+  â””â”€â”€ Transfer to server
+        â””â”€â”€ unzip + ./run.sh
+              â”œâ”€â”€ scripts/setup-database.sh
+              â”œâ”€â”€ Backend (uvicorn, no --reload)
+              â””â”€â”€ Frontend (vite preview or built dist)
 ```
 
 See `DEPLOY-UBUNTU.md` for full production setup including systemd service examples.
@@ -990,7 +990,7 @@ flowchart TB
 
     subgraph SRV_Detail["App Server"]
         FE["Vite/Static :5174"]
-        BE["FastAPI :8010"]
+        BE["FastAPI :8040"]
     end
 
     PC1 & PC2 --> FE
@@ -1001,7 +1001,7 @@ flowchart TB
 | Port | Service | Bind |
 |------|---------|------|
 | 5174 | Frontend | `0.0.0.0` (LAN accessible) |
-| 8010 | Backend API | `0.0.0.0` |
+| 8040 | Backend API | `0.0.0.0` |
 | 3306 | MySQL | localhost (typical) |
 
 ---
@@ -1117,7 +1117,7 @@ Loaded by `ConfigContext` on frontend; read by backend via `_load_config()` help
 | GET | `/health` | API alive check |
 | GET | `/health/db` | Database connectivity |
 
-Full interactive docs: `http://<host>:8010/docs`
+Full interactive docs: `http://<host>:8040/docs`
 
 ---
 
@@ -1125,56 +1125,56 @@ Full interactive docs: `http://<host>:8010/docs`
 
 ```
 EAP_PMS_code/
-├── ARCHITECTURE.md          ← This document
-├── run.ps1                  ← Windows launcher
-├── run.sh                   ← Ubuntu launcher
-├── PACKAGE.ps1              ← Deployment packager
-├── DEPLOY-UBUNTU.md         ← Linux deployment guide
-├── OEE-FORMULAS.txt         ← OEE calculation reference
-├── TITAN-CPLM-INTEGRATION.md
-│
-├── frontend/
-│   ├── package.json
-│   ├── vite.config.js       ← Proxy config, port 5174
-│   └── src/
-│       ├── main.jsx         ← Entry point
-│       ├── App.jsx          ← Routes + providers
-│       ├── navigation.jsx   ← Role-based nav
-│       ├── api/
-│       │   ├── client.js    ← axios + JWT
-│       │   └── useWebSocket.js
-│       ├── context/         ← Auth, Config, Theme, Branding, Embed
-│       ├── pages/           ← Feature screens (business logic)
-│       ├── components/
-│       │   ├── layout/      ← AppShell, AppBar, Sidebar
-│       │   ├── basic/       ← TitanModal, FormField
-│       │   ├── charts/      ← Recharts wrappers
-│       │   └── production-planning/
-│       ├── themes/          ← CSS tokens, color themes
-│       └── utils/           ← SPC, QC, cycle time helpers
-│
-├── backend/
-│   ├── requirements.txt
-│   ├── .env                 ← DATABASE_URL, SECRET_KEY
-│   ├── app/
-│   │   ├── main.py          ← FastAPI app entry
-│   │   ├── models.py        ← SQLAlchemy ORM (all tables)
-│   │   ├── auth.py          ← JWT + bcrypt + role guards
-│   │   ├── ws_manager.py    ← WebSocket broadcast
-│   │   ├── scheduler_service.py
-│   │   ├── deviation_alert_service.py
-│   │   ├── qc_spc_utils.py
-│   │   ├── qc_shift_utils.py
-│   │   ├── upload_limits.py
-│   │   └── routers/         ← One file per API domain
-│   ├── static/              ← Uploaded files
-│   └── migrate_*.py         ← Startup migrations
-│
-└── database/
-    ├── schema.sql           ← Base schema
-    ├── migrate_*.sql        ← Incremental SQL migrations
-    ├── init_database.ps1    ← Windows DB setup
-    └── db.config.json       ← DB credentials
+â”œâ”€â”€ ARCHITECTURE.md          â† This document
+â”œâ”€â”€ run.ps1                  â† Windows launcher
+â”œâ”€â”€ run.sh                   â† Ubuntu launcher
+â”œâ”€â”€ PACKAGE.ps1              â† Deployment packager
+â”œâ”€â”€ DEPLOY-UBUNTU.md         â† Linux deployment guide
+â”œâ”€â”€ OEE-FORMULAS.txt         â† OEE calculation reference
+â”œâ”€â”€ TITAN-CPLM-INTEGRATION.md
+â”‚
+â”œâ”€â”€ frontend/
+â”‚   â”œâ”€â”€ package.json
+â”‚   â”œâ”€â”€ vite.config.js       â† Proxy config, port 5174
+â”‚   â””â”€â”€ src/
+â”‚       â”œâ”€â”€ main.jsx         â† Entry point
+â”‚       â”œâ”€â”€ App.jsx          â† Routes + providers
+â”‚       â”œâ”€â”€ navigation.jsx   â† Role-based nav
+â”‚       â”œâ”€â”€ api/
+â”‚       â”‚   â”œâ”€â”€ client.js    â† axios + JWT
+â”‚       â”‚   â””â”€â”€ useWebSocket.js
+â”‚       â”œâ”€â”€ context/         â† Auth, Config, Theme, Branding, Embed
+â”‚       â”œâ”€â”€ pages/           â† Feature screens (business logic)
+â”‚       â”œâ”€â”€ components/
+â”‚       â”‚   â”œâ”€â”€ layout/      â† AppShell, AppBar, Sidebar
+â”‚       â”‚   â”œâ”€â”€ basic/       â† TitanModal, FormField
+â”‚       â”‚   â”œâ”€â”€ charts/      â† Recharts wrappers
+â”‚       â”‚   â””â”€â”€ production-planning/
+â”‚       â”œâ”€â”€ themes/          â† CSS tokens, color themes
+â”‚       â””â”€â”€ utils/           â† SPC, QC, cycle time helpers
+â”‚
+â”œâ”€â”€ backend/
+â”‚   â”œâ”€â”€ requirements.txt
+â”‚   â”œâ”€â”€ .env                 â† DATABASE_URL, SECRET_KEY
+â”‚   â”œâ”€â”€ app/
+â”‚   â”‚   â”œâ”€â”€ main.py          â† FastAPI app entry
+â”‚   â”‚   â”œâ”€â”€ models.py        â† SQLAlchemy ORM (all tables)
+â”‚   â”‚   â”œâ”€â”€ auth.py          â† JWT + bcrypt + role guards
+â”‚   â”‚   â”œâ”€â”€ ws_manager.py    â† WebSocket broadcast
+â”‚   â”‚   â”œâ”€â”€ scheduler_service.py
+â”‚   â”‚   â”œâ”€â”€ deviation_alert_service.py
+â”‚   â”‚   â”œâ”€â”€ qc_spc_utils.py
+â”‚   â”‚   â”œâ”€â”€ qc_shift_utils.py
+â”‚   â”‚   â”œâ”€â”€ upload_limits.py
+â”‚   â”‚   â””â”€â”€ routers/         â† One file per API domain
+â”‚   â”œâ”€â”€ static/              â† Uploaded files
+â”‚   â””â”€â”€ migrate_*.py         â† Startup migrations
+â”‚
+â””â”€â”€ database/
+    â”œâ”€â”€ schema.sql           â† Base schema
+    â”œâ”€â”€ migrate_*.sql        â† Incremental SQL migrations
+    â”œâ”€â”€ init_database.ps1    â† Windows DB setup
+    â””â”€â”€ db.config.json       â† DB credentials
 ```
 
 ---
@@ -1196,15 +1196,15 @@ EAP_PMS_code/
 
 ### Known Architectural Trade-offs
 
-1. **No API cache layer** — Pages re-fetch on every navigation; WebSocket triggers manual refresh.
-2. **Local file storage** — Not suitable for multi-server deployment without shared storage.
-3. **JWT in localStorage** — Standard for SPA but vulnerable to XSS (mitigate with CSP in production).
-4. **Single timezone** — Hardcoded IST; no multi-site timezone support.
-5. **No automated test suite** — Quality relies on manual verification.
+1. **No API cache layer** â€” Pages re-fetch on every navigation; WebSocket triggers manual refresh.
+2. **Local file storage** â€” Not suitable for multi-server deployment without shared storage.
+3. **JWT in localStorage** â€” Standard for SPA but vulnerable to XSS (mitigate with CSP in production).
+4. **Single timezone** â€” Hardcoded IST; no multi-site timezone support.
+5. **No automated test suite** â€” Quality relies on manual verification.
 
 ---
 
-## Appendix A — Default Credentials
+## Appendix A â€” Default Credentials
 
 | Username | Password | Role |
 |----------|----------|------|
@@ -1214,15 +1214,16 @@ EAP_PMS_code/
 
 ---
 
-## Appendix B — Related Documents
+## Appendix B â€” Related Documents
 
 | Document | Location |
 |----------|----------|
 | OEE formulas | `OEE-FORMULAS.txt` |
 | CPLM UI integration | `TITAN-CPLM-INTEGRATION.md` |
 | Ubuntu deployment | `DEPLOY-UBUNTU.md` |
-| API interactive docs | `http://localhost:8010/docs` |
+| API interactive docs | `http://localhost:8040/docs` |
 
 ---
 
 *End of Architecture Document*
+

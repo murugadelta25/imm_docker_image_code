@@ -14,7 +14,7 @@ $ProjectDir = $PSScriptRoot
 $BackendDir = Join-Path $ProjectDir "backend"
 $FrontendDir = Join-Path $ProjectDir "frontend"
 $BackendPort = 8040
-$FrontendPort = 5184
+$FrontendPort = 5174
 $TotalSteps = 8
 
 function Get-PrimaryLanIp {
@@ -665,8 +665,8 @@ foreach ($ip in $networkIPs) {
     Write-Host ("    -> Network (Vite :{0})  : http://{1}:{0}  (needs firewall rule)" -f $FrontendPort, $ip) -ForegroundColor DarkGray
 }
 Write-Host ""
-Write-Host "  LAN tip: use port 80 / din.eappms from other PCs. :5184 times out if Windows Firewall blocks Vite." -ForegroundColor Yellow
-Write-Host "  502 Bad Gateway usually means backend (8040) or frontend (5184) window stopped - keep both open." -ForegroundColor Yellow
+Write-Host "  LAN tip: use port 80 / din.eappms from other PCs. :5174 times out if Windows Firewall blocks Vite." -ForegroundColor Yellow
+Write-Host "  502 Bad Gateway usually means backend (8040) or frontend (5174) window stopped - keep both open." -ForegroundColor Yellow
 Write-Host ""
 $primaryIp = if ($dnsCfg -and $dnsCfg.LanIp) { $dnsCfg.LanIp } else { Get-PrimaryLanIp -Ips $networkIPs -ProjectDir $ProjectDir }
 Write-Host "  Network access (Windows / Ubuntu / Android):" -ForegroundColor White

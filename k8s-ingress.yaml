@@ -11,8 +11,8 @@ spec:
   externalName: 172.16.28.251
   ports:
     - name: http
-      port: 5184
-      targetPort: 5184
+      port: 5174
+      targetPort: 5174
 ---
 apiVersion: v1
 kind: Service
@@ -86,4 +86,4 @@ spec:
               service:
                 name: eap-frontend
                 port:
-                  number: 5184
+                  number: 5174

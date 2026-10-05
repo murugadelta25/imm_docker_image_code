@@ -29,10 +29,10 @@ start_backend() {
   # shellcheck disable=SC1091
   source .venv/bin/activate
   pip install -r requirements.txt -q
-  nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+  nohup uvicorn app.main:app --host 0.0.0.0 --port 8040 --reload \
     > "$PROJECT_DIR/backend.log" 2>&1 &
   echo $! > "$BACKEND_PID"
-  echo "  Backend started (PID $(cat $BACKEND_PID)) → http://0.0.0.0:8000"
+  echo "  Backend started (PID $(cat $BACKEND_PID)) → http://0.0.0.0:8040"
   echo "  Logs: tail -f $PROJECT_DIR/backend.log"
 }
 
@@ -43,10 +43,10 @@ start_frontend() {
     echo "  Installing npm packages..."
     npm install
   fi
-  nohup npm run dev -- --host \
+  nohup npm run dev -- --host 0.0.0.0 --port 5174 \
     > "$PROJECT_DIR/frontend.log" 2>&1 &
   echo $! > "$FRONTEND_PID"
-  echo "  Frontend started (PID $(cat $FRONTEND_PID)) → http://0.0.0.0:5173"
+  echo "  Frontend started (PID $(cat $FRONTEND_PID)) → http://0.0.0.0:5174"
   echo "  Logs: tail -f $PROJECT_DIR/frontend.log"
 }
 
@@ -71,10 +71,10 @@ case "${1:-all}" in
     sleep 2
     start_frontend
     echo ""
-    echo "✅ PMS Dashboard running"
-    echo "   Frontend : http://$(hostname -I | awk '{print $1}'):5173"
-    echo "   Backend  : http://$(hostname -I | awk '{print $1}'):8000"
-    echo "   API Docs : http://$(hostname -I | awk '{print $1}'):8000/docs"
+    echo "✅ EAP IMM PMS running"
+    echo "   Frontend : http://$(hostname -I | awk '{print $1}'):5174"
+    echo "   Backend  : http://$(hostname -I | awk '{print $1}'):8040"
+    echo "   API Docs : http://$(hostname -I | awk '{print $1}'):8040/docs"
     echo ""
     echo "To stop: ./start.sh stop"
     ;;

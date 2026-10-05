@@ -1,4 +1,9 @@
-# PMS Production Dashboard
+# EAP IMM PMS
+
+## Ports (IMM)
+- Frontend: **5174**
+- Backend: **8040**
+- (EAP-PMS uses 5173 / 8030 — keep these separate)
 
 ## Stack
 - Frontend: React + Vite + Recharts
@@ -18,15 +23,18 @@ mysql -u root -p < database/schema.sql
 cd backend
 pip install -r requirements.txt
 # Edit .env with your MySQL credentials
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8040
 ```
 
 ### 3. Frontend
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev -- --host 0.0.0.0 --port 5174
 ```
+
+Open: http://localhost:5174
+API docs: http://localhost:8040/docs
 
 ## Default Users (update passwords after first login)
 | Username | Role | Default Password |

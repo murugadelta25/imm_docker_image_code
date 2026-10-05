@@ -1,10 +1,10 @@
-[
+﻿[
     {
         "id": "572f6917d02e38da",
         "type": "tab",
         "label": "IMM SIE -> EAP API",
         "disabled": false,
-        "info": "# IMM SIE EDA -> EAP IMM PMS (PUSH)\n\n## Configure\n1. Inject **1 Set EAP webhook URL** (includes throttle)\n2. Inject **2 Set machine fleet map** (Machine Configuration ID + name)\n3. Deploy\n\n## Throttle (stops continuous POST spam)\nDefault: max **1 push / 10 seconds / machine**, and skip unchanged payloads.\n\n```json\n{\n  \"webhook_url\": \"http://192.168.1.116/api/imm/nodered/webhook/push\",\n  \"webhook_secret\": \"\",\n  \"push_min_interval_ms\": 10000,\n  \"push_on_change_only\": true\n}\n```\n\nDo NOT use :5184 for webhook (frontend only).\n",
+        "info": "# IMM SIE EDA -> EAP IMM PMS (PUSH)\n\n## Configure\n1. Inject **1 Set EAP webhook URL** (includes throttle)\n2. Inject **2 Set machine fleet map** (Machine Configuration ID + name)\n3. Deploy\n\n## Throttle (stops continuous POST spam)\nDefault: max **1 push / 10 seconds / machine**, and skip unchanged payloads.\n\n```json\n{\n  \"webhook_url\": \"http://192.168.1.116/api/imm/nodered/webhook/push\",\n  \"webhook_secret\": \"\",\n  \"push_min_interval_ms\": 10000,\n  \"push_on_change_only\": true\n}\n```\n\nDo NOT use :5174 for webhook (frontend only).\n",
         "env": []
     },
     {
@@ -548,3 +548,4 @@
         ]
     }
 ]
+

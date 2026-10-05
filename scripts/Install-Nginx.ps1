@@ -3,7 +3,7 @@
 param(
     [string]$ProjectDir = (Split-Path $PSScriptRoot -Parent),
     [int]$BackendPort = 8040,
-    [int]$FrontendPort = 5184
+    [int]$FrontendPort = 5174
 )
 
 $ErrorActionPreference = "Stop"
@@ -282,14 +282,14 @@ function Open-FirewallTcpPort {
 function Open-EapPmsFirewallPorts {
     param(
         [int]$BackendPort = 8040,
-        [int]$FrontendPort = 5184
+        [int]$FrontendPort = 5174
     )
     Open-FirewallTcpPort -RuleName "EAP PMS nginx HTTP 80" -Port 80
     Open-FirewallTcpPort -RuleName "EAP PMS Vite $FrontendPort" -Port $FrontendPort
     Open-FirewallTcpPort -RuleName "EAP PMS API $BackendPort" -Port $BackendPort
 
     # Stale rules from older Titan ports — disable if present (do not delete user custom rules)
-    foreach ($stale in @("EAP-PMS Vite 5174", "EAP-PMS 8010")) {
+    foreach ($stale in @("EAP-IMM Vite 5174", "EAP-IMM 8040", "EAP-PMS Vite 5174", "EAP-PMS 8010")) {
         $old = Get-NetFirewallRule -DisplayName $stale -ErrorAction SilentlyContinue
         if ($old) {
             try {

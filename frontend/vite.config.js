@@ -1,10 +1,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// LAN access: bind IPv4 explicitly so other PCs can reach http://<ipc-ip>:5184
+// LAN access: bind IPv4 explicitly so other PCs can reach http://<ipc-ip>:5174
+// IMM ports: frontend 5174, backend 8040 (PMS uses 5173 / 8030 — do not collide)
 const sharedServer = {
   host: '0.0.0.0',
-  port: 5184,
+  port: 5174,
   strictPort: true,
   allowedHosts: true,
   proxy: {
