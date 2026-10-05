@@ -92,8 +92,15 @@ json.dump({
     "user": user,
     "password": password,
     "database": database,
+    "host": "localhost",
     "migrate": False,
     "legacyDatabase": "titan_oee",
+    "mysql": {
+        "host": "localhost",
+        "port": 3306,
+        "user": user,
+        "password": password,
+    },
 }, open(db_config_path, "w", encoding="utf-8"), indent=2)
 open(db_config_path, "a", encoding="utf-8").write("\n")
 PY

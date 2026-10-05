@@ -1,0 +1,11 @@
+{
+  "smtp_template": {
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "email_address": "",
+    "password_set": false
+  },
+  "groups": [],
+  "recipients": [],
+  "schedules": []
+}

@@ -1,0 +1,156 @@
+{
+  "shifts": [
+    {
+      "id": "A",
+      "name": "Shift A",
+      "start": "08:00",
+      "end": "20:00",
+      "enabled": true
+    },
+    {
+      "id": "B",
+      "name": "Shift B",
+      "start": "20:00",
+      "end": "08:00",
+      "enabled": true
+    },
+    {
+      "id": "C",
+      "name": "Shift C",
+      "start": "22:00",
+      "end": "06:00",
+      "enabled": false
+    }
+  ],
+  "breaks": {
+    "A": {
+      "lunch_break": 30,
+      "lunch_start": "12:00",
+      "lunch_end": "12:30",
+      "tea_break": 10,
+      "tea_start": "10:00",
+      "tea_end": "10:10",
+      "tpm_cleaning": 10,
+      "tpm_start": "11:00",
+      "tpm_end": "11:10",
+      "other_cleaning": 0,
+      "management_meeting": 0
+    },
+    "B": {
+      "lunch_break": 30,
+      "lunch_start": "00:00",
+      "lunch_end": "00:30",
+      "tea_break": 10,
+      "tea_start": "22:00",
+      "tea_end": "22:10",
+      "tpm_cleaning": 10,
+      "tpm_start": "23:00",
+      "tpm_end": "23:10",
+      "other_cleaning": 0,
+      "management_meeting": 0
+    },
+    "C": {
+      "lunch_break": 30,
+      "lunch_start": "02:00",
+      "lunch_end": "02:30",
+      "tea_break": 10,
+      "tea_start": "00:00",
+      "tea_end": "00:10",
+      "tpm_cleaning": 10,
+      "tpm_start": "01:00",
+      "tpm_end": "01:10",
+      "other_cleaning": 0,
+      "management_meeting": 0
+    }
+  },
+  "checkDataDaysBack": 1,
+  "hourly_output": {
+    "running_part_threshold_pct": 30,
+    "ld_unld_max_sec": 60,
+    "micro_gap_sec": 15
+  },
+  "loss_tracker_limits": {
+    "idle": 1,
+    "breakdown": 90,
+    "alarm": 30,
+    "offline": 30,
+    "setting_change": 120
+  },
+  "deviation_escalation": {
+    "enabled": true,
+    "levels": [
+      {
+        "level": 1,
+        "label": "Operator / Production",
+        "group_names": [
+          "production"
+        ],
+        "delay_minutes": 0
+      },
+      {
+        "level": 2,
+        "label": "Supervisor",
+        "group_names": [
+          "maintenance"
+        ],
+        "delay_minutes": 15
+      },
+      {
+        "level": 3,
+        "label": "Manager",
+        "group_names": [
+          "management"
+        ],
+        "delay_minutes": 30
+      }
+    ]
+  },
+  "factory": {
+    "configured": true,
+    "siteTitle": "Production Monitoring System (PMS)",
+    "faviconFactoryId": "id_1790843483241_vu2acport",
+    "factories": [
+      {
+        "id": "id_1790843483241_vu2acport",
+        "name": "Plastech Solutions",
+        "logoUrl": "/static/factory/factory_logo_7621ad1c.png",
+        "location": {
+          "address": "",
+          "lat": "",
+          "lng": ""
+        },
+        "departments": [
+          {
+            "id": "id_1790843512747_wwawej8e0",
+            "name": "Unit-3",
+            "lines": [
+              {
+                "id": "id_1790843525512_b1otl1ooc",
+                "name": "Zone1",
+                "stationIds": [
+                  1
+                ],
+                "dbId": 27
+              }
+            ],
+            "dbId": 17
+          }
+        ],
+        "dbId": 17
+      }
+    ],
+    "loginImageEnabled": true,
+    "loginImageUrl": "/static/factory/login_image_99ea2ea7.png",
+    "draftLogos": {},
+    "brandingLogoUrl": "/static/factory/factory_logo_7621ad1c.png"
+  },
+  "backup": {
+    "enabled": false,
+    "interval_days": 15,
+    "max_backups": 10,
+    "last_backup_at": null
+  },
+  "mobile_integration": {
+    "enabled": true
+  }
+}

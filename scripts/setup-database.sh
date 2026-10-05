@@ -45,19 +45,23 @@ apply_database_migrations() {
   done
 }
 
+resolve_python() {
+  if [ -x "$BACKEND_DIR/.venv/bin/python3" ]; then
+    echo "$BACKEND_DIR/.venv/bin/python3"
+  elif [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
+    echo "$BACKEND_DIR/.venv/bin/python"
+  elif [ -x "$BACKEND_DIR/venv/bin/python3" ]; then
+    echo "$BACKEND_DIR/venv/bin/python3"
+  elif [ -x "$BACKEND_DIR/venv/bin/python" ]; then
+    echo "$BACKEND_DIR/venv/bin/python"
+  else
+    echo "python3"
+  fi
+}
+
 run_schema_guard() {
   local py
-  if [ -x "$BACKEND_DIR/.venv/bin/python3" ]; then
-    py="$BACKEND_DIR/.venv/bin/python3"
-  elif [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
-    py="$BACKEND_DIR/.venv/bin/python"
-  elif [ -x "$BACKEND_DIR/venv/bin/python3" ]; then
-    py="$BACKEND_DIR/venv/bin/python3"
-  elif [ -x "$BACKEND_DIR/venv/bin/python" ]; then
-    py="$BACKEND_DIR/venv/bin/python"
-  else
-    py="python3"
-  fi
+  py="$(resolve_python)"
   log_step "[db] Running schema guard (IMM + base integration)..."
   (
     cd "$BACKEND_DIR"
@@ -65,6 +69,7 @@ run_schema_guard() {
   )
   log_ok "Schema guard complete"
 }
+
 
 if database_exists; then
   log_info "Database '${DB_NAME}' already exists — applying migrations"

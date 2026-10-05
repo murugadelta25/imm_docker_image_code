@@ -29,16 +29,16 @@ def _cfg():
         raw = json.loads(cfg_path.read_text(encoding="utf-8"))
         mysql = raw.get("mysql") or {}
         db_name = raw.get("database") or ""
-        client = raw.get("clientName") or ""
-        if not db_name or not client:
+        client = raw.get("clientName") or db_name or "EAP PMS"
+        if not db_name:
             raise SystemExit(
-                "database/db.config.json is incomplete. "
-                "Run .\\run.ps1 (or database\\setup_new_client.ps1) to enter customer details."
+                "database/db.config.json is incomplete (missing database). "
+                "Run .\\run.ps1 or ./run.sh on first launch."
             )
         return {
             "clientName": client,
-            "host": mysql.get("host") or "localhost",
-            "port": int(mysql.get("port") or 3306),
+            "host": mysql.get("host") or raw.get("host") or "localhost",
+            "port": int(mysql.get("port") or raw.get("port") or 3306),
             "user": mysql.get("user") or raw.get("user") or "root",
             "password": mysql.get("password") or raw.get("password") or "",
             "database": db_name,
@@ -166,6 +166,21 @@ def main():
             print("[OK] Migrated factory/zone JSON into relational tables")
     finally:
         db.close()
+
+    bundle = ROOT / "deploy" / "config-templates" / "app_config_bundle.json"
+    if bundle.exists():
+        import subprocess
+
+        py = sys.executable
+        script = ROOT / "scripts" / "import_app_config.py"
+        if script.exists():
+            print("[..] Applying deploy config templates (if empty)...")
+            rc = subprocess.call([py, str(script), "--if-empty"], cwd=str(ROOT))
+            if rc == 0:
+                print("[OK] Deploy config import finished")
+            else:
+                print(f"[WARN] Deploy config import exited {rc}")
+
     print("Done.")
 
 
