@@ -400,3 +400,37 @@ service_ctl() {
   shift
   sudo systemctl "$action" "${BACKEND_SERVICE}.service" "${FRONTEND_SERVICE}.service" "$@"
 }
+
+# Prefer backend/.venv (Windows run.ps1 + Ubuntu install-deps); accept legacy backend/venv.
+resolve_backend_python() {
+  if [ -x "$BACKEND_DIR/.venv/bin/python3" ]; then
+    echo "$BACKEND_DIR/.venv/bin/python3"
+  elif [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
+    echo "$BACKEND_DIR/.venv/bin/python"
+  elif [ -x "$BACKEND_DIR/venv/bin/python3" ]; then
+    echo "$BACKEND_DIR/venv/bin/python3"
+  elif [ -x "$BACKEND_DIR/venv/bin/python" ]; then
+    echo "$BACKEND_DIR/venv/bin/python"
+  else
+    return 1
+  fi
+}
+
+resolve_backend_venv_bin() {
+  if [ -x "$BACKEND_DIR/.venv/bin/python3" ] || [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
+    echo "$BACKEND_DIR/.venv/bin"
+  elif [ -x "$BACKEND_DIR/venv/bin/python3" ] || [ -x "$BACKEND_DIR/venv/bin/python" ]; then
+    echo "$BACKEND_DIR/venv/bin"
+  else
+    return 1
+  fi
+}
+
+ensure_backend_venv() {
+  if [ -d "$BACKEND_DIR/venv" ] && [ ! -d "$BACKEND_DIR/.venv" ]; then
+    mv "$BACKEND_DIR/venv" "$BACKEND_DIR/.venv"
+  fi
+  if [ ! -d "$BACKEND_DIR/.venv" ]; then
+    python3 -m venv "$BACKEND_DIR/.venv"
+  fi
+}

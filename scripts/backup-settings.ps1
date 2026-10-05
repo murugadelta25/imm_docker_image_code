@@ -8,8 +8,16 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectDir
 
-$venvPy = Join-Path $ProjectDir "backend\.venv\Scripts\python.exe"
-if (-not (Test-Path $venvPy)) { $venvPy = "python" }
+# Prefer backend\.venv (same as run.ps1); accept legacy backend\venv.
+$venvCandidates = @(
+    (Join-Path $ProjectDir "backend\.venv\Scripts\python.exe"),
+    (Join-Path $ProjectDir "backend\venv\Scripts\python.exe")
+)
+$venvPy = $venvCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $venvPy) {
+    Write-Host "[FAIL] No backend\.venv found. Run .\run.ps1 once to create it." -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "[..] Exporting app config templates for Git..." -ForegroundColor Cyan
 & $venvPy (Join-Path $ProjectDir "scripts\export_app_config.py")

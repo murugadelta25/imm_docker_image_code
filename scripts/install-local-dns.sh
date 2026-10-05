@@ -28,11 +28,10 @@ if [ -z "$LAN_IP" ]; then
   LAN_IP="$(detect_server_ip)"
 fi
 
-VENV_PY="$BACKEND_DIR/venv/bin/python"
-if [ ! -x "$VENV_PY" ]; then
+VENV_PY="$(resolve_backend_python)" || {
   log_warn "Python venv not found - skipping LAN DNS"
   exit 0
-fi
+}
 
 "$VENV_PY" -m pip install -q dnslib
 

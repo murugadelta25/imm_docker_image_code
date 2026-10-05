@@ -12,12 +12,11 @@ if [[ "${1:-}" == "--skip-db" ]]; then
   SKIP_DB=1
 fi
 
-if [[ -x "$PROJECT_DIR/backend/.venv/bin/python3" ]]; then
-  PY="$PROJECT_DIR/backend/.venv/bin/python3"
-elif [[ -x "$PROJECT_DIR/backend/.venv/bin/python" ]]; then
-  PY="$PROJECT_DIR/backend/.venv/bin/python"
-else
-  PY="python3"
+# shellcheck source=scripts/common.sh
+source "$SCRIPT_DIR/common.sh"
+if ! PY="$(resolve_backend_python)"; then
+  echo "[FAIL] No backend/.venv found. On Ubuntu: ./scripts/install-deps.sh  |  On Windows: .\\run.ps1" >&2
+  exit 1
 fi
 
 echo "[..] Exporting app config templates for Git..."
@@ -35,8 +34,6 @@ for f in deploy/domain.config.json deploy.env.example; do
 done
 
 if [[ "$SKIP_DB" -eq 0 ]] && [[ -f "$PROJECT_DIR/database/db.config.json" ]]; then
-  # shellcheck source=scripts/common.sh
-  source "$SCRIPT_DIR/common.sh"
   load_deploy_env 2>/dev/null || true
   if [[ -n "${DB_NAME:-}" ]] && command -v mysqldump >/dev/null 2>&1; then
     export MYSQL_PWD="${DB_PASSWORD:-}"

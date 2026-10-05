@@ -18,11 +18,16 @@ FRONTEND_PID="$PROJECT_DIR/.frontend.pid"
 start_backend() {
   echo "▶ Starting backend..."
   cd "$BACKEND_DIR"
-  if [ ! -d "venv" ]; then
-    echo "  Creating Python venv..."
-    python3 -m venv venv
+  # Match Windows run.ps1: use backend/.venv (migrate legacy venv/)
+  if [ -d "venv" ] && [ ! -d ".venv" ]; then
+    mv venv .venv
   fi
-  source venv/bin/activate
+  if [ ! -d ".venv" ]; then
+    echo "  Creating Python venv (backend/.venv)..."
+    python3 -m venv .venv
+  fi
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
   pip install -r requirements.txt -q
   nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
     > "$PROJECT_DIR/backend.log" 2>&1 &

@@ -14,6 +14,11 @@ CLIENT_LABEL="${CLIENT_NAME:-$BACKEND_SERVICE}"
 
 log_step "[systemd] Installing ${BACKEND_SERVICE} and ${FRONTEND_SERVICE} services..."
 
+VENV_BIN="$(resolve_backend_venv_bin)" || {
+  log_fail "No backend/.venv found. Run ./scripts/install-deps.sh first."
+  exit 1
+}
+
 sudo tee "/etc/systemd/system/${BACKEND_SERVICE}.service" >/dev/null <<EOF
 [Unit]
 Description=EAP PMS Backend — ${CLIENT_LABEL}
@@ -24,8 +29,8 @@ Wants=mysql.service
 Type=simple
 User=${CURRENT_USER}
 WorkingDirectory=${BACKEND_DIR}
-Environment=PATH=${BACKEND_DIR}/venv/bin:/usr/bin
-ExecStart=${BACKEND_DIR}/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${BACKEND_PORT}
+Environment=PATH=${VENV_BIN}:/usr/bin
+ExecStart=${VENV_BIN}/uvicorn app.main:app --host 0.0.0.0 --port ${BACKEND_PORT}
 Restart=always
 RestartSec=5
 StandardOutput=append:${BACKEND_LOG}

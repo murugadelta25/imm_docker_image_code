@@ -10,6 +10,11 @@ if ! command -v python3 >/dev/null; then
   log_warn "Installing Python 3..."
   sudo apt-get update -qq
   sudo apt-get install -y python3 python3-pip python3-venv python3-dev build-essential
+elif ! python3 -c "import ensurepip" 2>/dev/null || ! command -v pip3 >/dev/null; then
+  # python3 may exist without venv/pip packages (common on Ubuntu)
+  log_warn "Installing python3-venv / pip..."
+  sudo apt-get update -qq
+  sudo apt-get install -y python3-pip python3-venv python3-dev build-essential
 fi
 
 if ! command -v node >/dev/null || [ "$(node -v | sed 's/v//' | cut -d. -f1)" -lt 18 ]; then
@@ -37,16 +42,15 @@ if command -v ufw >/dev/null; then
 fi
 
 log_step "[deps] Python virtual environment..."
+# Same layout as Windows run.ps1: backend/.venv (migrate legacy backend/venv)
+ensure_backend_venv
 cd "$BACKEND_DIR"
-if [ ! -d venv ]; then
-  python3 -m venv venv
-fi
 # shellcheck disable=SC1091
-source venv/bin/activate
+source .venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r requirements.txt
 deactivate
-log_ok "Backend venv ready"
+log_ok "Backend .venv ready (Ubuntu + Windows shared path)"
 
 log_step "[deps] Frontend npm packages..."
 cd "$FRONTEND_DIR"

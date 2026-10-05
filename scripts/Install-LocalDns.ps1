@@ -58,8 +58,12 @@ $networkIPs = Get-NetworkIPs
 $resolvedIp = Resolve-LanIp -Configured $(if ($LanIp) { $LanIp } else { $settings.LanIp }) -NetworkIPs $networkIPs
 $ipArg = if ($settings.LanIp) { $settings.LanIp } else { "auto" }
 
-$venvPython = Join-Path $ProjectDir "backend\venv\Scripts\python.exe"
-if (-not (Test-Path $venvPython)) {
+$venvCandidates = @(
+    (Join-Path $ProjectDir "backend\.venv\Scripts\python.exe"),
+    (Join-Path $ProjectDir "backend\venv\Scripts\python.exe")
+)
+$venvPython = $venvCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $venvPython) {
     Write-Host "  [WARN] Python venv not found - skipping LAN DNS" -ForegroundColor Yellow
     return $settings
 }
