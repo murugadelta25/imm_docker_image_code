@@ -103,6 +103,129 @@ def _running_cavity_from_plan(plan, default: int = 1) -> int:
         return default
 
 
+def _shot_weight_from_plan(plan) -> Optional[float]:
+    """Std shot weight (g) from plan mold snapshot."""
+    details = _parse_mold_details(plan)
+    raw = details.get("std_shot_weight")
+    try:
+        if raw is None or raw == "":
+            return None
+        w = float(raw)
+        return w if w > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _tool_shot_weight(tool) -> Optional[float]:
+    if not tool or getattr(tool, "std_shot_weight", None) is None:
+        return None
+    try:
+        tw = float(tool.std_shot_weight)
+        return tw if tw > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_shot_weight(
+    db: Session,
+    plan=None,
+    machine_id: Optional[int] = None,
+) -> Optional[float]:
+    """Shot weight (g) from plan snapshot, mold master, or mounted ImmMold.
+
+    Order:
+      1. production plan mold_details_json.std_shot_weight
+      2. ToolStock via plan.mold_id / details.mold_id / mold_code
+      3. Active ImmMold on the machine → mold master (Std. Shot Weight)
+    """
+    w = _shot_weight_from_plan(plan)
+    if w is not None:
+        return w
+
+    from ..models import ToolStock, ImmMold
+    from ..tool_service import find_tool, find_tool_by_mold_no
+
+    details = _parse_mold_details(plan)
+    mold_id = getattr(plan, "mold_id", None) if plan else None
+    if mold_id in (None, ""):
+        mold_id = details.get("mold_id")
+    try:
+        mold_id = int(mold_id) if mold_id not in (None, "") else None
+    except (TypeError, ValueError):
+        mold_id = None
+
+    if mold_id is not None:
+        tool = db.query(ToolStock).filter(ToolStock.id == mold_id).first()
+        w = _tool_shot_weight(tool)
+        if w is not None:
+            return w
+
+    for key in ("mold_code", "mold_name", "mold_no", "tool_code"):
+        raw = details.get(key)
+        code = str(raw).strip() if raw not in (None, "") else ""
+        if not code:
+            continue
+        tool = find_tool_by_mold_no(db, code) or find_tool(db, tool_code=code, tool_name=code)
+        w = _tool_shot_weight(tool)
+        if w is not None:
+            return w
+
+    # Plan display label e.g. "MM-001-FLANGE · Flange"
+    mv = (getattr(plan, "model_variant", None) or "").strip() if plan else ""
+    if mv:
+        candidates = [mv]
+        if "·" in mv:
+            candidates.extend(p.strip() for p in mv.split("·") if p.strip())
+        elif " - " in mv:
+            candidates.extend(p.strip() for p in mv.split(" - ") if p.strip())
+        for code in candidates:
+            tool = find_tool_by_mold_no(db, code) or find_tool(db, tool_code=code, tool_name=code)
+            w = _tool_shot_weight(tool)
+            if w is not None:
+                return w
+
+    mid = machine_id
+    if mid is None and plan is not None:
+        mid = getattr(plan, "machine_id", None)
+    if mid:
+        try:
+            imm = (
+                db.query(ImmMold)
+                .filter(ImmMold.machine_id == int(mid), ImmMold.is_active == 1)
+                .first()
+            )
+            if not imm:
+                imm = (
+                    db.query(ImmMold)
+                    .filter(ImmMold.machine_id == int(mid))
+                    .order_by(ImmMold.id.desc())
+                    .first()
+                )
+            if imm:
+                tool = find_tool_by_mold_no(db, getattr(imm, "mold_no", None))
+                w = _tool_shot_weight(tool)
+                if w is not None:
+                    return w
+        except Exception:
+            pass
+
+    return None
+
+
+def _rm_usage_kg(shot_count, shot_weight_g: Optional[float]) -> Optional[float]:
+    """RM usage (kg) = shot_count × shot_weight_g / 1000."""
+    if shot_weight_g is None or shot_count is None:
+        return None
+    try:
+        w = float(shot_weight_g)
+        s = float(shot_count)
+        if w <= 0:
+            return None
+        return round(s * w / 1000.0, 3)
+    except (TypeError, ValueError):
+        return None
+
+
 def _set_plan_running_cavity(plan, running_cavity: int) -> dict:
     details = _parse_mold_details(plan)
     details["running_cavity"] = int(running_cavity)
@@ -465,7 +588,11 @@ def get_entries(
         d["plan_id"] = plan.id if plan else None
         actual = int(e.actual_qty or 0)
         # Derive shot count from stored parts when cavity known
-        d["shot_count"] = int(actual // cav) if cav > 0 else actual
+        shots = int(actual // cav) if cav > 0 else actual
+        d["shot_count"] = shots
+        shot_w = _resolve_shot_weight(db, plan, e.machine_id)
+        d["std_shot_weight"] = shot_w
+        d["rm_usage_kg"] = _rm_usage_kg(shots, shot_w)
         result.append(d)
     return result
 
@@ -678,6 +805,7 @@ def _compute_realtime_oee_for_date(
             # Shot count from good-count / status-tag events (shift window starts at 0)
             from ..imm_shot_counter import count_machine_shots, shift_shots_and_parts
             running_cavity = _running_cavity_from_plan(primary_plan, default=1)
+            std_shot_weight = _resolve_shot_weight(db, primary_plan, mid)
             try:
                 shot_count, actual_qty, _mold_period = shift_shots_and_parts(
                     db, mid, shift_start, effective_end, fallback_cavity=running_cavity,
@@ -743,7 +871,9 @@ def _compute_realtime_oee_for_date(
                 "current_operation": cur_op,
                 "next_operation": next_op,
                 "running_cavity": running_cavity,
+                "std_shot_weight": std_shot_weight,
                 "shot_count": int(shot_count),
+                "rm_usage_kg": _rm_usage_kg(shot_count, std_shot_weight),
                 "plan_id": primary_plan.id if primary_plan else None,
                 "process_time": float(primary_ct) if primary_ct else 0,
                 "loading_unloading": 0,
@@ -912,11 +1042,15 @@ def _manual_entry_to_report_row(
     planned_qty=None,
     running_cavity=None,
     shot_count=None,
+    std_shot_weight=None,
 ) -> SimpleNamespace:
     cav = running_cavity if running_cavity is not None else getattr(e, "running_cavity", None)
     shots = shot_count if shot_count is not None else getattr(e, "shot_count", None)
     if shots is None and cav and int(cav) > 0:
         shots = int((e.actual_qty or 0) // int(cav))
+    shot_w = std_shot_weight
+    if shot_w is None:
+        shot_w = getattr(e, "std_shot_weight", None)
     return SimpleNamespace(
         id=e.id,
         source="manual",
@@ -931,7 +1065,9 @@ def _manual_entry_to_report_row(
         current_operation=e.current_operation or "",
         next_operation=e.next_operation or "",
         running_cavity=cav,
+        std_shot_weight=shot_w,
         shot_count=shots,
+        rm_usage_kg=_rm_usage_kg(shots, shot_w),
         process_time=float(e.process_time or 0),
         loading_unloading=float(e.loading_unloading or 0),
         start_time=e.start_time or "",
@@ -992,7 +1128,11 @@ def _realtime_to_report_row(rt: dict) -> SimpleNamespace:
         current_operation=rt.get("current_operation") or "",
         next_operation=rt.get("next_operation") or "",
         running_cavity=rt.get("running_cavity"),
+        std_shot_weight=rt.get("std_shot_weight"),
         shot_count=rt.get("shot_count"),
+        rm_usage_kg=rt.get("rm_usage_kg") if rt.get("rm_usage_kg") is not None else _rm_usage_kg(
+            rt.get("shot_count"), rt.get("std_shot_weight"),
+        ),
         process_time=float(rt.get("process_time") or 0),
         loading_unloading=float(rt.get("loading_unloading") or 0),
         start_time="",
@@ -1137,6 +1277,7 @@ def collect_merged_oee_report_rows(
             pl = plan_msd.get((e.machine_id, str(e.entry_date), e.shift), {})
         plan = plan_primary.get((e.machine_id, str(e.entry_date), e.shift))
         cav = _running_cavity_from_plan(plan, default=1) if plan else None
+        shot_w = _resolve_shot_weight(db, plan, e.machine_id)
         manual_rows.append(_manual_entry_to_report_row(
             e,
             station_name=station_map.get(e.station_no, str(e.station_no)),
@@ -1144,6 +1285,7 @@ def collect_merged_oee_report_rows(
             work_order_no=pl.get("wo", ""),
             planned_qty=pl.get("planned"),
             running_cavity=cav,
+            std_shot_weight=shot_w,
         ))
 
     # Live / realtime rows
@@ -1480,7 +1622,9 @@ async def update_running_cavity(
     return {
         "plan_id": plan.id,
         "running_cavity": cav,
+        "std_shot_weight": (rt or {}).get("std_shot_weight"),
         "shot_count": (rt or {}).get("shot_count"),
+        "rm_usage_kg": (rt or {}).get("rm_usage_kg"),
         "actual_qty": (rt or {}).get("actual_qty"),
         "possible_qty": (rt or {}).get("possible_qty"),
         "production_loss": (rt or {}).get("production_loss"),
@@ -1603,7 +1747,7 @@ def download_xlsx(
     ws_oee = wb.active
     ws_oee.title = "OEE Report"
     oee_hdrs = ["Date","Station","Machine","Shift","Work Order","Model / Variant",
-                "Running Cavity","Shot Counts","CT (sec)",
+                "Running Cavity","Shot Weight (g)","Shot Counts","RM Usage (kg)","CT (sec)",
                 "Avail (min)","Op Time (min)","Plan Qty","Possible Qty","Actual Qty",
                 "Prod Loss","Accepted Qty","Defect Qty",
                 "AR%","PR%","QR%","OEE%",
@@ -1626,12 +1770,18 @@ def download_xlsx(
         shots = getattr(e, "shot_count", None)
         if shots is None and run_cav and int(run_cav or 0) > 0:
             shots = int((e.actual_qty or 0) // int(run_cav))
+        shot_w = getattr(e, "std_shot_weight", None)
+        rm_kg = getattr(e, "rm_usage_kg", None)
+        if rm_kg is None:
+            rm_kg = _rm_usage_kg(shots, shot_w)
         ws_oee.append([
             str(e.entry_date), e.station_name or str(e.station_no or ""),
             e.machine_name or "",
             e.shift, e.work_order_no or "", e.model_variant or "",
             run_cav if run_cav is not None else "",
+            shot_w if shot_w is not None else "",
             shots if shots is not None else "",
+            rm_kg if rm_kg is not None else "",
             ct, e.available_shift_time, e.operating_time,
             plan_qty, e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,
@@ -1643,11 +1793,11 @@ def download_xlsx(
             "Live" if e.source == "realtime" else "Data Entry",
         ])
         ri = ws_oee.max_row
-        ws_oee.cell(ri, 21).font = grn_f if oee_val>=85 else (amb_f if oee_val>=65 else red_f)
-        for col, raw in [(18, ar_raw), (19, pr_raw), (20, qr_raw), (21, oee_raw)]:
+        ws_oee.cell(ri, 23).font = grn_f if oee_val>=85 else (amb_f if oee_val>=65 else red_f)
+        for col, raw in [(20, ar_raw), (21, pr_raw), (22, qr_raw), (23, oee_raw)]:
             if raw is not None:
                 ws_oee.cell(ri, col).font = amb_f
-    for i, w in enumerate([12,14,12,8,18,16,14,14,10,12,14,10,12,12,10,12,12,8,8,8,8,14,14,14,14,12], 1):
+    for i, w in enumerate([12,14,12,8,18,16,14,14,12,14,10,12,14,10,12,12,10,12,12,8,8,8,8,14,14,14,14,12], 1):
         ws_oee.column_dimensions[ws_oee.cell(1,i).column_letter].width = w
 
     # ── QC Logs sheet ──
@@ -1786,6 +1936,7 @@ def download_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Date","Station","Machine","Shift","Work Order","Model / Variant",
+                     "Running Cavity","Shot Weight (g)","Shot Counts","RM Usage (kg)",
                      "Current Operation","Next Operation","CT",
                      "Start","Stop","Total Min",
                      "Lunch","Tea","TPM","Other Clean","Mgmt Mtg","No Load","New Model","Power Cut",
@@ -1796,9 +1947,21 @@ def download_csv(
                      "Source"])
     for e in entries:
         plan_qty = e.planned_qty if e.planned_qty is not None else ""
+        run_cav = getattr(e, "running_cavity", None)
+        shots = getattr(e, "shot_count", None)
+        if shots is None and run_cav and int(run_cav or 0) > 0:
+            shots = int((e.actual_qty or 0) // int(run_cav))
+        shot_w = getattr(e, "std_shot_weight", None)
+        rm_kg = getattr(e, "rm_usage_kg", None)
+        if rm_kg is None:
+            rm_kg = _rm_usage_kg(shots, shot_w)
         writer.writerow([e.entry_date, e.station_name or str(e.station_no or ""),
                          e.machine_name or "",
                          e.shift, e.work_order_no or "", e.model_variant or "",
+                         run_cav if run_cav is not None else "",
+                         shot_w if shot_w is not None else "",
+                         shots if shots is not None else "",
+                         rm_kg if rm_kg is not None else "",
                          e.current_operation, e.next_operation,
                          (e.process_time or 0)+(e.loading_unloading or 0), e.start_time, e.stop_time,
                          e.total_minutes, e.lunch_break, e.tea_break, e.tpm_cleaning, e.other_cleaning,

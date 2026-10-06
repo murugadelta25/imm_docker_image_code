@@ -265,6 +265,8 @@ export default function Dashboard() {
           plan_id: r.data.plan_id ?? e.plan_id,
         };
         if (r.data.shot_count != null) next.shot_count = r.data.shot_count;
+        if (r.data.std_shot_weight != null) next.std_shot_weight = r.data.std_shot_weight;
+        if (r.data.rm_usage_kg != null) next.rm_usage_kg = r.data.rm_usage_kg;
         if (r.data.actual_qty != null) next.actual_qty = r.data.actual_qty;
         if (r.data.possible_qty != null) next.possible_qty = r.data.possible_qty;
         if (r.data.production_loss != null) next.production_loss = r.data.production_loss;
@@ -650,12 +652,12 @@ export default function Dashboard() {
       <div style={s.tableWrap}>
         <table style={s.table}>
           <thead>
-            <tr>{['Date','Station','Machine','Shift','Work Order','Model / Variant','Running Cavity','Shot Counts','CT','Avail(min)','Op Time','Plan Qty','Possible','Actual','Prod Loss','Accp','Defect','AR%','PR%','QR%','OEE%','QC Edit'].map(h =>
+            <tr>{['Date','Station','Machine','Shift','Work Order','Model / Variant','Running Cavity','Shot Weight (g)','Shot Counts','RM Usage (kg)','CT','Avail(min)','Op Time','Plan Qty','Possible','Actual','Prod Loss','Accp','Defect','AR%','PR%','QR%','OEE%','QC Edit'].map(h =>
               <th key={h} style={s.th}>{h}</th>)}</tr>
           </thead>
           <tbody>
             {entries.length === 0 ? (
-              <tr><td colSpan={22} style={{ ...s.td, textAlign: 'center', color: t.textFaint, padding: 24 }}>
+              <tr><td colSpan={24} style={{ ...s.td, textAlign: 'center', color: t.textFaint, padding: 24 }}>
                 No entries found
               </td></tr>
             ) : entries.map(e => {
@@ -669,6 +671,14 @@ export default function Dashboard() {
               const shotCounts = e.shot_count != null
                 ? Number(e.shot_count)
                 : (runCav > 0 ? Math.floor(safeNum(e.actual_qty) / runCav) : safeNum(e.actual_qty));
+              const shotWeight = e.std_shot_weight != null && e.std_shot_weight !== ''
+                ? Number(e.std_shot_weight)
+                : null;
+              const rmUsageKg = e.rm_usage_kg != null && e.rm_usage_kg !== ''
+                ? Number(e.rm_usage_kg)
+                : (shotWeight != null && Number.isFinite(shotCounts) && shotWeight > 0
+                  ? Math.round((shotCounts * shotWeight / 1000) * 1000) / 1000
+                  : null);
               return (
                 <Fragment key={e.id}>
                   <tr style={s.tr}>
@@ -759,8 +769,14 @@ export default function Dashboard() {
                         </button>
                       )}
                     </td>
+                    <td style={s.td} title="Std shot weight of mold / variant (g)">
+                      {shotWeight != null && Number.isFinite(shotWeight) ? shotWeight : '—'}
+                    </td>
                     <td style={s.td} title="Injection cycles — Actual = Shot Counts × Running Cavity">
                       {Number.isFinite(shotCounts) ? shotCounts : '—'}
+                    </td>
+                    <td style={s.td} title="RM Usage (kg) = Shot Counts × Shot Weight (g) / 1000">
+                      {rmUsageKg != null && Number.isFinite(rmUsageKg) ? rmUsageKg : '—'}
                     </td>
                     <td style={s.td}>{formatCtSeconds(sumCt(e.process_time, e.loading_unloading))}</td>
                     <td style={s.td}>{e.available_shift_time}</td>
@@ -828,7 +844,7 @@ export default function Dashboard() {
                   {/* QC history expansion row */}
                   {showLog && (
                     <tr key={`log-${e.id}`}>
-                      <td colSpan={22} style={{ padding: '0 8px 12px 8px', background: t.surface2 }}>
+                      <td colSpan={24} style={{ padding: '0 8px 12px 8px', background: t.surface2 }}>
                         <div style={{ padding: '10px 12px', borderRadius: 8, background: t.surface,
                                       border: `1px solid ${t.border}`, marginTop: 4 }}>
                           <div style={{ color: t.accent, fontWeight: 600, fontSize: 12, marginBottom: 8 }}>
@@ -1006,6 +1022,8 @@ export default function Dashboard() {
                       <span>= Operating Time / Planned Prod Time</span>
                       <span style={{ fontWeight: 600, color: t.accent }}>PR</span>
                       <span>= (Units × Set CT) / Operating Time · Units = Shots × Running Cavity</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>RM Usage (kg)</span>
+                      <span>= Shot Counts × Shot Weight (g) / 1000</span>
                       <span style={{ fontWeight: 600, color: t.accent }}>QR</span>
                       <span>= Good Units / Total Units</span>
                       <span style={{ fontWeight: 600, color: t.accent }}>OEE</span>

@@ -82,7 +82,7 @@ def build_oee_xlsx(db: Session, report_date=None) -> bytes:
     from openpyxl.styles import Font, PatternFill, Alignment
     from ..models import OEEDefectLog, User
     from datetime import date as date_type, timedelta
-    from .oee import collect_merged_oee_report_rows
+    from .oee import collect_merged_oee_report_rows, _rm_usage_kg
 
     if report_date is None:
         report_date = date_type.today() - timedelta(days=1)
@@ -111,7 +111,7 @@ def build_oee_xlsx(db: Session, report_date=None) -> bytes:
     amb_font  = Font(bold=True, color="D97706")
 
     headers = ["Date","Station","Machine","Shift","Work Order","Model / Variant",
-               "Running Cavity","Shot Counts","CT (sec)",
+               "Running Cavity","Shot Weight (g)","Shot Counts","RM Usage (kg)","CT (sec)",
                "Avail (min)","Op Time (min)","Plan Qty","Possible Qty","Actual Qty",
                "Prod Loss","Accepted Qty","Defect Qty",
                "AR%","PR%","QR%","OEE%",
@@ -142,12 +142,18 @@ def build_oee_xlsx(db: Session, report_date=None) -> bytes:
         shots = getattr(e, "shot_count", None)
         if shots is None and run_cav and int(run_cav or 0) > 0:
             shots = int((e.actual_qty or 0) // int(run_cav))
+        shot_w = getattr(e, "std_shot_weight", None)
+        rm_kg = getattr(e, "rm_usage_kg", None)
+        if rm_kg is None:
+            rm_kg = _rm_usage_kg(shots, shot_w)
         ws.append([
             str(e.entry_date), e.station_name or str(e.station_no or ""),
             e.machine_name or "",
             e.shift, e.work_order_no or "", e.model_variant or "",
             run_cav if run_cav is not None else "",
+            shot_w if shot_w is not None else "",
             shots if shots is not None else "",
+            rm_kg if rm_kg is not None else "",
             ct, e.available_shift_time, e.operating_time,
             plan_qty, e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,
@@ -159,12 +165,12 @@ def build_oee_xlsx(db: Session, report_date=None) -> bytes:
             "Live" if e.source == "realtime" else "Data Entry",
         ])
         row_idx = ws.max_row
-        ws.cell(row_idx, 21).font = grn_font if oee_val >= 85 else (amb_font if oee_val >= 65 else red_font)
-        for col, raw in [(18, ar_raw), (19, pr_raw), (20, qr_raw), (21, oee_raw)]:
+        ws.cell(row_idx, 23).font = grn_font if oee_val >= 85 else (amb_font if oee_val >= 65 else red_font)
+        for col, raw in [(20, ar_raw), (21, pr_raw), (22, qr_raw), (23, oee_raw)]:
             if raw is not None:
                 ws.cell(row_idx, col).font = amb_font
 
-    col_widths = [12,14,12,8,18,16,14,14,10,12,14,10,12,12,10,12,12,8,8,8,8,14,14,14,14,12]
+    col_widths = [12,14,12,8,18,16,14,14,12,14,10,12,14,10,12,12,10,12,12,8,8,8,8,14,14,14,14,12]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
 
