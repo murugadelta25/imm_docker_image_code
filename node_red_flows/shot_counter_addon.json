@@ -1,0 +1,78 @@
+[
+  {
+    "id": "c4f1a2b3d5e6f789",
+    "type": "function",
+    "z": "528afbba36988f42",
+    "name": "Shot Counter & CSV Writer",
+    "func": "// ── Shot Counter & CSV Writer ──────────────────────────────────────────────\n// Placed after \"Normalize & store IMM trx\".\n// Receives msg.payload = { machine_id, machine_name, parameters: { Total_Good_Count, ... } }\n//\n// Logic:\n//  - shot_count : any CHANGE in Total_Good_Count → +1  (regardless of numeric value)\n//  - counter    : increments only when new Total_Good_Count > 0  (status=1 logic)\n//  - Shift A    : 08:00 – 20:00 local  →  ShiftA_YYYY-MM-DD.csv\n//  - Shift B    : 20:00 – 08:00 local  →  ShiftB_YYYY-MM-DD.csv  (date = shift-start date)\n//  - Both counters reset at every shift boundary, per machine independently.\n\nconst fs   = require('fs');\nconst path = require('path');\n\nconst CSV_DIR = '/data/eap_shots';\n\n// ─── helpers ────────────────────────────────────────────────────────────────\nfunction pad(n) { return String(n).padStart(2, '0'); }\n\nfunction getShiftInfo(now) {\n  const h   = now.getHours();  // local 0-23\n  const fmt = (d) =>\n    d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());\n\n  if (h >= 8 && h < 20) {\n    // Shift A — started today at 08:00\n    return { shift: 'A', dateLabel: fmt(now) };\n  }\n  // Shift B — started at 20:00; if h < 8 the shift started yesterday\n  const startDate = new Date(now);\n  if (h < 8) startDate.setDate(startDate.getDate() - 1);\n  return { shift: 'B', dateLabel: fmt(startDate) };\n}\n\nfunction csvFilePath(shift, dateLabel) {\n  return path.join(CSV_DIR, 'Shift' + shift + '_' + dateLabel + '.csv');\n}\n\nfunction ensureDir(dir) {\n  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });\n}\n\nfunction appendRow(filePath, row) {\n  const needHeader = !fs.existsSync(filePath);\n  if (needHeader) {\n    fs.writeFileSync(\n      filePath,\n      'timestamp,shift,date_label,machine_id,machine_name,total_good_count,machine_shot_count,counter\\n',\n      'utf8'\n    );\n  }\n  fs.appendFileSync(\n    filePath,\n    [\n      row.timestamp, row.shift, row.date_label,\n      row.machine_id, row.machine_name,\n      row.total_good_count, row.machine_shot_count, row.counter\n    ].join(',') + '\\n',\n    'utf8'\n  );\n}\n\n// ─── guard ──────────────────────────────────────────────────────────────────\nconst entry = msg.payload;\nif (!entry || !entry.parameters) return null;\n\nconst rawGC = entry.parameters.Total_Good_Count;\nif (rawGC === undefined || rawGC === null || rawGC === '') return null;\n\nconst machineId   = entry.machine_id   !== undefined ? entry.machine_id : null;\nconst machineName = String(entry.machine_name || 'UNKNOWN').trim();\nconst storeKey    = machineId !== null ? ('m' + machineId) : machineName.toUpperCase();\n\nconst now       = new Date();\nconst shiftInfo = getShiftInfo(now);\nconst shiftKey  = shiftInfo.shift + '_' + shiftInfo.dateLabel;  // e.g. \"A_2026-10-07\"\n\n// ─── per-machine persistent state ───────────────────────────────────────────\nconst allState = global.get('EAP_SHOT_STATE') || {};\nlet   st       = allState[storeKey] || { prevGC: null, shotCount: 0, counter: 0, shiftKey: '' };\n\n// Shift boundary → reset counters (prevGC kept to avoid false-fire on first message)\nif (st.shiftKey !== shiftKey) {\n  st.shotCount = 0;\n  st.counter   = 0;\n  st.shiftKey  = shiftKey;\n}\n\nconst newGC  = String(rawGC).trim();\nconst prevGC = st.prevGC;      // null on very first message for this machine\n\nlet shotFired = 0;\n\nif (prevGC !== null && prevGC !== newGC) {\n  // Any change in Total_Good_Count value = 1 shot\n  shotFired    = 1;\n  st.shotCount += 1;\n\n  // Counter: only when new value is numeric AND > 0  (\"status turns 1\" logic)\n  const numGC = parseFloat(newGC);\n  if (Number.isFinite(numGC) && numGC > 0) {\n    st.counter += 1;\n  }\n}\n\nst.prevGC          = newGC;\nallState[storeKey] = st;\nglobal.set('EAP_SHOT_STATE', allState);\n\n// ─── CSV append ─────────────────────────────────────────────────────────────\ntry {\n  ensureDir(CSV_DIR);\n  const ts = now.getFullYear() + '-' +\n             pad(now.getMonth() + 1) + '-' +\n             pad(now.getDate())      + 'T' +\n             pad(now.getHours())     + ':' +\n             pad(now.getMinutes())   + ':' +\n             pad(now.getSeconds());\n\n  appendRow(csvFilePath(shiftInfo.shift, shiftInfo.dateLabel), {\n    timestamp          : ts,\n    shift              : shiftInfo.shift,\n    date_label         : shiftInfo.dateLabel,\n    machine_id         : machineId !== null ? machineId : '',\n    machine_name       : machineName,\n    total_good_count   : newGC,\n    machine_shot_count : st.shotCount,\n    counter            : st.counter\n  });\n} catch (e) {\n  node.warn('CSV write error: ' + e.message);\n}\n\n// ─── output ──────────────────────────────────────────────────────────────────\nmsg.payload = {\n  machine_id         : machineId,\n  machine_name       : machineName,\n  Total_Good_Count   : newGC,\n  machine_shot_count : st.shotCount,\n  counter            : st.counter,\n  shift              : shiftInfo.shift,\n  shift_date         : shiftInfo.dateLabel,\n  shot_fired         : shotFired\n};\n\nnode.status({\n  fill : shotFired ? 'green' : 'blue',\n  shape: 'dot',\n  text : machineName + ' GC=' + newGC + ' shots=' + st.shotCount + ' ctr=' + st.counter\n});\n\nreturn msg;",
+    "outputs": 1,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 650,
+    "y": 160,
+    "wires": [
+      [
+        "d7e8f9a0b1c2d3e4"
+      ]
+    ]
+  },
+
+  {
+    "id": "d7e8f9a0b1c2d3e4",
+    "type": "debug",
+    "z": "528afbba36988f42",
+    "name": "Shot counter output (debug)",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 920,
+    "y": 160,
+    "wires": []
+  },
+
+  {
+    "id": "a1b2c3d4e5f6a7b8",
+    "type": "inject",
+    "z": "528afbba36988f42",
+    "name": "Reset all shot counters (manual)",
+    "props": [
+      { "p": "payload" },
+      { "p": "topic", "vt": "str" }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "reset_shot_counters",
+    "payload": "{}",
+    "payloadType": "json",
+    "x": 200,
+    "y": 1140,
+    "wires": [
+      ["b2c3d4e5f6a7b8c9"]
+    ]
+  },
+
+  {
+    "id": "b2c3d4e5f6a7b8c9",
+    "type": "function",
+    "z": "528afbba36988f42",
+    "name": "Clear EAP_SHOT_STATE",
+    "func": "global.set('EAP_SHOT_STATE', {});\nnode.status({ fill:'yellow', shape:'ring', text:'all shot counters reset ' + new Date().toLocaleTimeString() });\nnode.warn('EAP_SHOT_STATE cleared manually');\nreturn null;",
+    "outputs": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 490,
+    "y": 1140,
+    "wires": []
+  }
+]
