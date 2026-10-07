@@ -339,8 +339,8 @@ export default function EmailAlerts() {
               return (
                 <div key={g.id} style={{ ...s.groupCard, borderTop:`3px solid ${color}` }}>
                   <div style={s.groupHeader2}>
-                    <span style={{ color, fontWeight:700, fontSize:15 }}>{icon} {g.name}</span>
-                    <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                    <span style={{ color, fontWeight:700, fontSize:15, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flex:1 }}>{icon} {g.name}</span>
+                    <div style={{ display:'flex', gap:6, alignItems:'center', flexShrink:0 }}>
                       <span style={{ ...s.badge, background:color+'22', color }}>{g.count} active</span>
                       <button style={{ ...s.miniBtn, background: isEditing ? t.surface2 : '#0ea5e9' }}
                         onClick={() => isEditing ? setEditGroup(null) : startEditGroup(g)}
@@ -413,9 +413,9 @@ export default function EmailAlerts() {
                         </div>
                       ) : (
                         <div style={{ ...s.memberRow, opacity: m.active ? 1 : 0.4 }}>
-                          <div style={{ flex:1 }}>
-                            <div style={{ color:t.text, fontSize:13 }}>{m.name}</div>
-                            <div style={{ color:t.textMuted, fontSize:11 }}>{m.email}</div>
+                          <div style={{ flex:1, minWidth:0, overflow:'hidden' }}>
+                            <div style={{ color:t.text, fontSize:13, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{m.name}</div>
+                            <div style={{ color:t.textMuted, fontSize:11, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{m.email}</div>
                           </div>
                           <button style={{ ...s.miniBtn, background:'#0ea5e9' }}
                             onClick={() => setEditRecip({ id:m.id, group_id:m.group_id || g.id, name:m.name, email:m.email, active:m.active })}
@@ -898,12 +898,12 @@ function getStyles(t) {
            cursor:'pointer', fontWeight:600, fontSize:13 },
     infoBox: { background:t.surface2, border:`1px solid ${t.surface2}`, borderRadius:6, padding:'10px 14px',
                color:t.textMuted, fontSize:12, marginTop:12 },
-    groupGrid: { display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(280px,1fr))', gap:14 },
-    groupCard: { background:t.surface, borderRadius:10, padding:16 },
-    groupHeader2: { display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 },
-    badge: { padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:600 },
+    groupGrid: { display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(320px,1fr))', gap:14 },
+    groupCard: { background:t.surface, borderRadius:10, padding:16, minWidth:0 },
+    groupHeader2: { display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6, gap:8 },
+    badge: { padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:600, flexShrink:0 },
     memberRow: { display:'flex', alignItems:'center', gap:8, padding:'6px 0',
-                 borderBottom:`1px solid ${t.surface2}` },
+                 borderBottom:`1px solid ${t.surface2}`, minWidth:0 },
     miniBtn: { padding:'3px 8px', border:'none', borderRadius:4, color:'#fff',
                cursor:'pointer', fontSize:12, fontWeight:600, flexShrink:0 },
     checkLabel: { display:'flex', alignItems:'center', gap:8, padding:'8px 12px', borderRadius:8,
