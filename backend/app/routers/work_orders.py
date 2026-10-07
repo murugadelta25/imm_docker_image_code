@@ -890,6 +890,20 @@ async def delete_work_order(
     wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
     if not wo:
         raise HTTPException(404, "Work order not found")
+
+    # Block deletion if any plans are still linked to this work order
+    linked_plan_count = (
+        db.query(ProductionPlan)
+        .filter(ProductionPlan.work_order_id == wo_id)
+        .count()
+    )
+    if linked_plan_count > 0:
+        raise HTTPException(
+            400,
+            f"Cannot delete work order: it has {linked_plan_count} plan(s) assigned. "
+            "Please remove the plans first.",
+        )
+
     wo_no = wo.work_order_no
     db.query(ProductionPlan).filter(ProductionPlan.work_order_id == wo_id).update(
         {ProductionPlan.work_order_id: None},

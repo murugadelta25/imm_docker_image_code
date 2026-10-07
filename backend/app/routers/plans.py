@@ -405,6 +405,15 @@ def get_summary(
                      for sh in ["A","B"]}
     }
 
+@router.get("/{plan_id}")
+def get_plan(plan_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Fetch a single plan by ID. Returns the plan even if its linked work order was deleted."""
+    plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    return _plan_dict(plan, db)
+
+
 def _plan_dict(plan: ProductionPlan, db: Session) -> dict:
     """Serialize plan with linked model-change interlock state."""
     d = {c.name: getattr(plan, c.name) for c in plan.__table__.columns}
