@@ -1,0 +1,950 @@
+[
+    {
+        "id": "528afbba36988f42",
+        "type": "tab",
+        "label": "IMM SIE -> EAP API",
+        "disabled": false,
+        "info": "# IMM SIE EDA -> EAP IMM PMS (PUSH)\n\nIncludes IMM_07..IMM_11 plus **PLC_Plastech** (IMM17 / IMM18 status + plant energy meter).\n\n**Shot counting (Node-RED):** Normalize & store runs a per-machine FSM and pushes `EAP_Shot_Event=1` when a shot completes — EAP only records the event (light).\n- OPCUA IMM_07..11: Total_Good_Count increase → shot(s); actual = shots × running cavity\n- IMM17/18: inj→refill rise, or motor on + refilling pulse (rise→fall)\n\n## Configure\n1. Inject **1 Set EAP webhook URL**\n2. Inject **2 Set machine fleet map** (IMM17→3, IMM18→4)\n3. Inject **3 Set energy meter targets** (default EM_PLANT — not tied to IMM machines)\n4. Deploy\n\n## Energy meter\nPlant energy (PF / V / I / totals) is pushed as **EM_PLANT**. Map that source to any panel in the Energy Meter dashboard.\n\n## Throttle\nDefault: max **1 push / 10 seconds / machine** (energy gated separately), skip unchanged payloads.\n\nDo NOT use :5174 for webhook (frontend only)."
+    },
+    {
+        "id": "8cb1d3d7a68f5686",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "1 Set EAP webhook URL",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "eap_config",
+        "payload": "{\"webhook_url\":\"http://192.168.1.111:8040/api/imm/nodered/webhook/push\",\"webhook_secret\":\"\",\"push_min_interval_ms\":10000,\"push_on_change_only\":true}",
+        "payloadType": "json",
+        "x": 200,
+        "y": 720,
+        "wires": [
+            [
+                "2552d6f35563bc2d"
+            ]
+        ]
+    },
+    {
+        "id": "7f764819bbed790a",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "Re-apply EAP URL (manual)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "eap_config",
+        "payload": "{\"webhook_url\":\"http://192.168.1.111:5184//api/imm/nodered/webhook/push\",\"webhook_secret\":\"\",\"push_min_interval_ms\":10000,\"push_on_change_only\":true}",
+        "payloadType": "json",
+        "x": 210,
+        "y": 760,
+        "wires": [
+            [
+                "2552d6f35563bc2d"
+            ]
+        ]
+    },
+    {
+        "id": "2552d6f35563bc2d",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Save EAP config -> global",
+        "func": "const cfg = msg.payload || {};\n\nif (cfg.webhook_url) {\n  const url = String(cfg.webhook_url).trim().replace(/\\/+$/, '');\n  global.set('EAP_WEBHOOK_URL', url);\n}\nif (cfg.webhook_secret !== undefined) {\n  global.set('EAP_WEBHOOK_SECRET', String(cfg.webhook_secret || ''));\n}\nif (cfg.eap_host) global.set('EAP_HOST', String(cfg.eap_host).trim());\nif (cfg.eap_port) global.set('EAP_PORT', String(cfg.eap_port).trim());\nif (cfg.use_port80 === true) {\n  const host = cfg.eap_host || global.get('EAP_HOST') || '192.168.1.110';\n  global.set('EAP_WEBHOOK_URL', `http://${host}/api/imm/nodered/webhook/push`);\n}\n\nconst interval = Number(cfg.push_min_interval_ms);\nglobal.set('EAP_PUSH_MIN_INTERVAL_MS', Number.isFinite(interval) && interval >= 0 ? interval : 10000);\nglobal.set('EAP_PUSH_ON_CHANGE_ONLY', cfg.push_on_change_only !== false);\n\nconst active = global.get('EAP_WEBHOOK_URL') || '(host/port fallback)';\nconst thr = global.get('EAP_PUSH_MIN_INTERVAL_MS') + 'ms change=' + global.get('EAP_PUSH_ON_CHANGE_ONLY');\nnode.status({ fill: 'blue', shape: 'ring', text: active + ' | ' + thr });\nnode.warn('EAP webhook URL set: ' + active + ' throttle=' + thr);\nreturn null;",
+        "outputs": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 740,
+        "wires": []
+    },
+    {
+        "id": "34a7253151951e8e",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "2 Set machine fleet map",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "eap_fleet_map",
+        "payload": "{\"IMM_07\": {\"machine_id\": 1, \"machine_name\": \"IMM_07\"}, \"IMM_08\": {\"machine_id\": 2, \"machine_name\": \"IMM_08\"}, \"IMM17\": {\"machine_id\": 3, \"machine_name\": \"IMM17\"}, \"IMM18\": {\"machine_id\": 4, \"machine_name\": \"IMM18\"}, \"IMM_09\": {\"machine_id\": 5, \"machine_name\": \"IMM_09\"}, \"IMM_10\": {\"machine_id\": 6, \"machine_name\": \"IMM_10\"}, \"IMM_11\": {\"machine_id\": 7, \"machine_name\": \"IMM_11\"}}",
+        "payloadType": "json",
+        "x": 210,
+        "y": 820,
+        "wires": [
+            [
+                "415f2bd36739dea2"
+            ]
+        ]
+    },
+    {
+        "id": "4fa5bbdff5768d39",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "Re-apply fleet map (manual)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "eap_fleet_map",
+        "payload": "{\"IMM_07\": {\"machine_id\": 1, \"machine_name\": \"IMM_07\"}, \"IMM_08\": {\"machine_id\": 2, \"machine_name\": \"IMM_08\"}, \"IMM17\": {\"machine_id\": 3, \"machine_name\": \"IMM17\"}, \"IMM18\": {\"machine_id\": 4, \"machine_name\": \"IMM18\"}, \"IMM_09\": {\"machine_id\": 5, \"machine_name\": \"IMM_09\"}, \"IMM_10\": {\"machine_id\": 6, \"machine_name\": \"IMM_10\"}, \"IMM_11\": {\"machine_id\": 7, \"machine_name\": \"IMM_11\"}}",
+        "payloadType": "json",
+        "x": 220,
+        "y": 860,
+        "wires": [
+            [
+                "415f2bd36739dea2"
+            ]
+        ]
+    },
+    {
+        "id": "415f2bd36739dea2",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Save fleet map -> global",
+        "func": "const raw = msg.payload || {};\nconst map = {};\nObject.keys(raw).forEach((k) => {\n  const row = raw[k] || {};\n  const mid = Number(row.machine_id);\n  if (!Number.isFinite(mid) || mid <= 0) return;\n  map[String(k).trim().toUpperCase()] = {\n    machine_id: mid,\n    machine_name: String(row.machine_name || k).trim()\n  };\n});\nglobal.set('EAP_MACHINE_FLEET', map);\nconst summary = Object.keys(map).map((k) => k + '->' + map[k].machine_id).join(', ');\nnode.status({ fill: 'blue', shape: 'dot', text: summary || 'empty map' });\nnode.warn('EAP machine fleet map: ' + (summary || '(empty)'));\nreturn null;",
+        "outputs": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 840,
+        "wires": []
+    },
+    {
+        "id": "b9cace019096e3de",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "3 Set energy meter targets",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1.2",
+        "topic": "eap_energy_meters",
+        "payload": "[\"EM_PLANT\"]",
+        "payloadType": "json",
+        "x": 840,
+        "y": 680,
+        "wires": [
+            [
+                "d9c603aa2c8a47ea"
+            ]
+        ]
+    },
+    {
+        "id": "cedfd2b10b71286a",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "Re-apply energy meters (manual)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "eap_energy_meters",
+        "payload": "[\"EM_PLANT\"]",
+        "payloadType": "json",
+        "x": 850,
+        "y": 740,
+        "wires": [
+            [
+                "d9c603aa2c8a47ea"
+            ]
+        ]
+    },
+    {
+        "id": "d9c603aa2c8a47ea",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Save energy meters -> global",
+        "func": "const raw = msg.payload;\nlet list = [];\nif (Array.isArray(raw)) list = raw;\nelse if (raw && Array.isArray(raw.meters)) list = raw.meters;\nelse if (raw && typeof raw === 'object') list = Object.keys(raw);\nlist = list.map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);\nif (!list.length) list = ['EM_PLANT'];\nglobal.set('EAP_ENERGY_METERS', list);\nnode.status({ fill: 'blue', shape: 'dot', text: list.join(', ') });\nnode.warn('EAP energy meter targets: ' + list.join(', ') + ' (not tied to IMM machines)');\nreturn null;",
+        "outputs": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1100,
+        "y": 620,
+        "wires": []
+    },
+    {
+        "id": "e862b7f1d083129e",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Normalize & store IMM trx",
+        "func": "const DEVICE_LABELS = {\n  'b695f76c-457a-4742-89d3-8950cc1f38a2': 'IMM_07',\n  '279cb5fc-18b1-4b7a-8e0c-fde9fc1e8fdf': 'IMM_08',\n  '69a56343-e331-4165-85a4-ebcc754d1f84': 'IMM_09',\n  '3a678f1d-1a26-4c2f-a208-a59efbbfd522': 'IMM_10',\n  'e3d7ca17-9f75-43fb-b8c4-c2b389245f63': 'IMM_11'\n};\n\nconst DEFAULT_FLEET = {\n  IMM_07: { machine_id: 1, machine_name: 'IMM_07' },\n  IMM_08: { machine_id: 2, machine_name: 'IMM_08' },\n  IMM17: { machine_id: 3, machine_name: 'IMM17' },\n  IMM18: { machine_id: 4, machine_name: 'IMM18' },\n  IMM_09: { machine_id: 5, machine_name: 'IMM_09' },\n  IMM_10: { machine_id: 6, machine_name: 'IMM_10' },\n  IMM_11: { machine_id: 7, machine_name: 'IMM_11' }\n};\n\nconst p = msg.payload || {};\nlet body = {};\nif (p.body && typeof p.body === 'object' && !Array.isArray(p.body)) {\n  body = p.body;\n} else if (p.trx && p.trx.body && typeof p.trx.body === 'object') {\n  body = p.trx.body;\n} else if (typeof p === 'object' && p.Actual_Cycle_Time !== undefined) {\n  body = p;\n}\n\nconst deviceId = String(p.device || msg.device || '').trim();\nif (!deviceId) {\n  node.warn('IMM trx missing device UUID');\n  return null;\n}\n\nconst trxName = String((p.trx && p.trx.name) || p.name || msg.topic || '').trim();\nconst isEnergyTrx = trxName.indexOf('EnergyMeter_') === 0;\n\nlet label = String(p.machine_name || p.device_name || '').trim();\nif (!label && /^IMM\\d+$/i.test(trxName)) label = trxName.toUpperCase();\nif (!label && isEnergyTrx) label = 'EM_PLANT';\nif (!label && DEVICE_LABELS[deviceId]) label = DEVICE_LABELS[deviceId];\nif (!label) label = deviceId;\n\nconst labelKey = String(label).trim().toUpperCase();\nconst isEnergyLabel = isEnergyTrx || /^EM_/.test(labelKey) || /^PANEL-/.test(labelKey);\n\nconst fleet = global.get('EAP_MACHINE_FLEET') || DEFAULT_FLEET;\nlet mapped = fleet[labelKey] || fleet[label] || null;\n\n// Energy meter stream is independent of IMM machines — allow name-only push\nif (!mapped && isEnergyLabel) {\n  mapped = { machine_id: null, machine_name: labelKey || 'EM_PLANT' };\n}\n\nif (!mapped || (!mapped.machine_id && !isEnergyLabel)) {\n  node.warn('No EAP fleet map for ' + label + ' - edit inject \"2 Set machine fleet map\"');\n  node.status({ fill: 'red', shape: 'ring', text: 'unmapped ' + label });\n  return null;\n}\n\nconst parameters = {};\nObject.keys(body).forEach((k) => {\n  const v = body[k];\n  if (v !== null && v !== undefined && v !== '') {\n    parameters[k] = String(v);\n  }\n});\n\nconst midNum = mapped.machine_id != null && mapped.machine_id !== ''\n  ? Number(mapped.machine_id)\n  : null;\nconst entry = {\n  machine_id: Number.isFinite(midNum) && midNum > 0 ? midNum : null,\n  machine_name: String(mapped.machine_name || labelKey || label),\n  device_id: deviceId,\n  device_name: labelKey || label,\n  trx_name: trxName,\n  message_id: p.id || null,\n  received_at: new Date().toISOString(),\n  parameter_count: Object.keys(parameters).length,\n  parameters\n};\n\nconst storeKey = entry.machine_id\n  ? ('m' + entry.machine_id)\n  : ('e:' + String(entry.machine_name).toUpperCase());\nconst store = global.get('immLiveByDevice') || {};\nconst prev = store[storeKey] || {};\nconst prevParams = prev.parameters || {};\n\n// ── Shot detection in Node-RED (keeps EAP backend light) ──\n// OPCUA IMM_07..11: Total_Good_Count increase → shot(s); backend also counts on ingest\n// IMM17/18: inj→refill rise OR motor on + refill pulse (rise then fall)\nconst truthy = (v) => {\n  const s = String(v == null ? '' : v).trim().toLowerCase();\n  return s === 'true' || s === '1' || s === 'on' || s === 'yes';\n};\nconst changed = (key) => {\n  if (!Object.prototype.hasOwnProperty.call(parameters, key)) return false;\n  return String(prevParams[key] ?? '') !== String(parameters[key] ?? '');\n};\n\nconst SHOT_TIMEOUT_MS = 300000;\nconst fsmAll = global.get('EAP_SHOT_FSM') || {};\nlet fsm = fsmAll[storeKey] || { state: 'idle', mode: '', updated_at: 0 };\nif (fsm.state !== 'idle' && (Date.now() - Number(fsm.updated_at || 0)) > SHOT_TIMEOUT_MS) {\n  fsm = { state: 'idle', mode: '', updated_at: 0 };\n}\n\nlet shot = 0;\n// OPC UA good-count shots are recorded by the EAP backend on ingest (avoid double count).\n// Node-RED only emits EAP_Shot_Event for IMM17/18 status-tag sequences.\nif (!isEnergyLabel && (changed('Injection_Status') || changed('Refilling_Status') || changed('Motor_Status'))) {\n  const motorOn = truthy(parameters.Motor_Status);\n  const injRise = changed('Injection_Status') && truthy(parameters.Injection_Status) && !truthy(prevParams.Injection_Status);\n  const refRise = changed('Refilling_Status') && truthy(parameters.Refilling_Status) && !truthy(prevParams.Refilling_Status);\n  const refFall = changed('Refilling_Status') && !truthy(parameters.Refilling_Status) && truthy(prevParams.Refilling_Status);\n  if (injRise && refRise) {\n    fsm = { state: 'saw_injection', mode: 'status_tags', updated_at: Date.now() };\n  } else if (injRise) {\n    fsm = { state: 'saw_injection', mode: 'status_tags', updated_at: Date.now() };\n  } else if (refRise && fsm.state === 'saw_injection') {\n    shot = 1;\n    fsm = { state: 'idle', mode: 'status_tags', updated_at: Date.now() };\n  } else if (refRise && motorOn) {\n    fsm = { state: 'saw_refill_high', mode: 'status_tags', updated_at: Date.now() };\n  } else if (refFall && fsm.state === 'saw_refill_high') {\n    shot = 1;\n    fsm = { state: 'idle', mode: 'status_tags', updated_at: Date.now() };\n  }\n}\n\nfsmAll[storeKey] = fsm;\nglobal.set('EAP_SHOT_FSM', fsmAll);\n\nconst mergedParams = Object.assign({}, prevParams, parameters);\ndelete mergedParams.EAP_Shot_Event;\nentry.parameters = mergedParams;\nentry.parameter_count = Object.keys(mergedParams).length;\nstore[storeKey] = Object.assign({}, entry);\nglobal.set('immLiveByDevice', store);\n\nif (shot) {\n  entry.parameters = Object.assign({}, mergedParams, { EAP_Shot_Event: '1' });\n  entry.shot_count = 1;\n  entry.shot_mode = fsm.mode || '';\n  msg.force_eap_push = true;\n  node.status({\n    fill: 'green',\n    shape: 'dot',\n    text: 'SHOT ' + entry.machine_name + (entry.machine_id ? (' #' + entry.machine_id) : '')\n  });\n} else if (changed('Total_Good_Count')) {\n  // IMM_07..11: push immediately so EAP can count shots from good-count delta\n  msg.force_eap_push = true;\n  node.status({\n    fill: 'green',\n    shape: 'dot',\n    text: 'GOOD ' + entry.machine_name + (entry.machine_id ? (' #' + entry.machine_id) : '')\n  });\n} else {\n  node.status({\n    fill: 'green',\n    shape: 'dot',\n    text: entry.machine_name + (entry.machine_id ? (' -> fleet #' + entry.machine_id) : ' (energy)') + ' (' + entry.parameter_count + 'p)'\n  });\n}\n\nmsg.payload = entry;\nmsg.device_id = deviceId;\nmsg.machine_id = entry.machine_id;\nmsg.store_key = storeKey;\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 390,
+        "y": 160,
+        "wires": [
+            [
+                "8547068602f8a0f7",
+                "3d13264d981c71bc",
+                "eb827b17bff5e6b9",
+                "cbf407477ca5df94"
+            ]
+        ]
+    },
+    {
+        "id": "eb827b17bff5e6b9",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Throttle EAP push",
+        "func": "const entry = msg.payload || {};\nconst mid = String(entry.machine_id || msg.machine_id || '').trim();\nconst mname = String(entry.machine_name || '').trim().toUpperCase();\nconst trx = String(entry.trx_name || '').trim();\nconst isEnergy = trx.indexOf('EnergyMeter_') === 0 || /^EM_/.test(mname) || /^PANEL-/.test(mname);\nconst gateKey = (mid || mname || 'unknown') + '|' + (isEnergy ? 'energy' : 'machine');\nif (!mid && !mname) return null;\n\nconst minMs = Number(global.get('EAP_PUSH_MIN_INTERVAL_MS'));\nconst interval = Number.isFinite(minMs) && minMs >= 0 ? minMs : 10000;\nconst changeOnly = global.get('EAP_PUSH_ON_CHANGE_ONLY') !== false;\n\nconst params = entry.parameters || {};\nconst energyOnly = {};\nObject.keys(params).forEach((k) => {\n  if (/^(Energy_|Total_)/.test(k)) energyOnly[k] = params[k];\n});\nconst sig = JSON.stringify(isEnergy ? energyOnly : params);\nconst now = Date.now();\n\nconst lastSig = global.get('immPushSigByDevice') || {};\nconst lastAt = global.get('immPushAtByDevice') || {};\nconst prevSig = lastSig[gateKey];\nconst prevAt = Number(lastAt[gateKey] || 0);\nconst changed = prevSig !== sig;\nconst due = (now - prevAt) >= interval;\n\nconst who = mid || mname;\n\n// Shot pulse from Node-RED FSM — always push immediately (EAP_Shot_Event=1)\nconst shotPulse =\n  msg.force_eap_push === true ||\n  Number(entry.shot_count) === 1 ||\n  String(params.EAP_Shot_Event || '') === '1';\nif (shotPulse && !isEnergy) {\n  lastSig[gateKey] = sig;\n  lastAt[gateKey] = now;\n  global.set('immPushSigByDevice', lastSig);\n  global.set('immPushAtByDevice', lastAt);\n  node.status({ fill: 'green', shape: 'dot', text: 'push SHOT ' + who });\n  return msg;\n}\n\n// Energy totals / PF / V / I: push immediately when energy fields change (bypass short throttle)\nif (isEnergy && changed) {\n  lastSig[gateKey] = sig;\n  lastAt[gateKey] = now;\n  global.set('immPushSigByDevice', lastSig);\n  global.set('immPushAtByDevice', lastAt);\n  node.status({\n    fill: 'green',\n    shape: 'dot',\n    text: 'push energy ' + who + ' change'\n  });\n  return msg;\n}\n\nif (!due) {\n  node.status({\n    fill: 'yellow',\n    shape: 'ring',\n    text: 'throttle ' + Math.ceil((interval - (now - prevAt)) / 1000) + 's ' + who\n  });\n  return null;\n}\n\nif (changeOnly && !changed) {\n  // Heartbeat: still push occasionally so EAP does not mark Motor/Heater as Offline\n  const hbMs = Number(global.get('EAP_PUSH_HEARTBEAT_MS'));\n  const heartbeat = Number.isFinite(hbMs) && hbMs > 0 ? hbMs : 60000;\n  const since = now - prevAt;\n  if (since < heartbeat) {\n    lastAt[gateKey] = now;\n    global.set('immPushAtByDevice', lastAt);\n    node.status({ fill: 'yellow', shape: 'ring', text: 'skip unchanged ' + who });\n    return null;\n  }\n  // fall through — force a keep-alive push\n}\n\nlastSig[gateKey] = sig;\nlastAt[gateKey] = now;\nglobal.set('immPushSigByDevice', lastSig);\nglobal.set('immPushAtByDevice', lastAt);\n\nnode.status({\n  fill: 'green',\n  shape: 'dot',\n  text: 'push ' + (entry.machine_name || who) + (changed ? ' change' : '')\n});\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 650,
+        "y": 200,
+        "wires": [
+            [
+                "20602b7aa85e8bc2"
+            ]
+        ]
+    },
+    {
+        "id": "20602b7aa85e8bc2",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Prepare EAP push",
+        "func": "const WEBHOOK_URL = global.get('EAP_WEBHOOK_URL');\nconst WEBHOOK_SECRET = global.get('EAP_WEBHOOK_SECRET') || '';\n\nlet url = WEBHOOK_URL;\nif (!url) {\n  const host = global.get('EAP_HOST') || '192.168.1.111';\n  const port = global.get('EAP_PORT') || '8040';\n  url = `http://${host}:${port}/api/imm/nodered/webhook/push`;\n}\n\nmsg.method = 'POST';\nmsg.url = url;\nmsg.headers = { 'Content-Type': 'application/json' };\nif (WEBHOOK_SECRET) {\n  msg.headers['X-Webhook-Secret'] = WEBHOOK_SECRET;\n}\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 870,
+        "y": 200,
+        "wires": [
+            [
+                "47233df4846e4685"
+            ]
+        ]
+    },
+    {
+        "id": "47233df4846e4685",
+        "type": "http request",
+        "z": "528afbba36988f42",
+        "name": "POST -> EAP webhook",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 710,
+        "y": 280,
+        "wires": [
+            [
+                "578327197229e8d4",
+                "5ad50be30007748d"
+            ]
+        ]
+    },
+    {
+        "id": "5ad50be30007748d",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Push status",
+        "func": "const code = msg.statusCode || 0;\nconst ok = code >= 200 && code < 300;\nnode.status({\n  fill: ok ? 'green' : 'red',\n  shape: 'dot',\n  text: (ok ? 'EAP OK ' : 'EAP ERR ') + code\n});\nif (!ok) {\n  node.warn('EAP push failed ' + code + ' url=' + (global.get('EAP_WEBHOOK_URL') || ''));\n}\nreturn null;",
+        "outputs": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 970,
+        "y": 320,
+        "wires": []
+    },
+    {
+        "id": "578327197229e8d4",
+        "type": "debug",
+        "z": "528afbba36988f42",
+        "name": "EAP push response (debug)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1020,
+        "y": 280,
+        "wires": []
+    },
+    {
+        "id": "8547068602f8a0f7",
+        "type": "debug",
+        "z": "528afbba36988f42",
+        "name": "stored (enable to debug)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 690,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "3d13264d981c71bc",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Update flow status",
+        "func": "const store = global.get('immLiveByDevice') || {};\nconst n = Object.keys(store).length;\nconst ids = Object.values(store).map((d) => (d.machine_name || '?') + '#' + (d.machine_id || '?')).join(', ');\nnode.status({ fill: 'green', shape: 'dot', text: n + ' live: ' + ids });\nreturn null;",
+        "outputs": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 710,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "0886b5a087fd8380",
+        "type": "http in",
+        "z": "528afbba36988f42",
+        "name": "GET /imm/api/health",
+        "url": "/imm/api/health",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 160,
+        "y": 940,
+        "wires": [
+            [
+                "ae02175f7fc15516"
+            ]
+        ]
+    },
+    {
+        "id": "ae02175f7fc15516",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Health check",
+        "func": "const store = global.get('immLiveByDevice') || {};\nmsg.payload = {\n  ok: true,\n  service: 'imm-nodered-api',\n  eap_webhook_url: global.get('EAP_WEBHOOK_URL') || null,\n  eap_machine_fleet: global.get('EAP_MACHINE_FLEET') || null,\n  eap_energy_meters: global.get('EAP_ENERGY_METERS') || ['EM_PLANT'],\n  push_min_interval_ms: global.get('EAP_PUSH_MIN_INTERVAL_MS'),\n  plant_energy: global.get('immPlantEnergyCache') || null,\n  device_count: Object.keys(store).length,\n  devices: Object.values(store).map(d => ({\n    machine_id: d.machine_id,\n    machine_name: d.machine_name,\n    device_id: d.device_id,\n    device_name: d.device_name,\n    received_at: d.received_at,\n    parameter_count: d.parameter_count\n  })),\n  updated_at: new Date().toISOString()\n};\nmsg.statusCode = 200;\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 940,
+        "wires": [
+            [
+                "5a2de5bcad72dda4"
+            ]
+        ]
+    },
+    {
+        "id": "c2132e7031ec0a10",
+        "type": "http in",
+        "z": "528afbba36988f42",
+        "name": "GET /imm/api/live",
+        "url": "/imm/api/live",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 150,
+        "y": 1000,
+        "wires": [
+            [
+                "f95809461b2ad5eb"
+            ]
+        ]
+    },
+    {
+        "id": "f95809461b2ad5eb",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Build live list",
+        "func": "const store = global.get('immLiveByDevice') || {};\nmsg.payload = {\n  ok: true,\n  count: Object.keys(store).length,\n  devices: Object.values(store),\n  plant_energy: global.get('immPlantEnergyCache') || null,\n  updated_at: new Date().toISOString()\n};\nmsg.statusCode = 200;\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 1000,
+        "wires": [
+            [
+                "5a2de5bcad72dda4"
+            ]
+        ]
+    },
+    {
+        "id": "a89316f7e9cdab79",
+        "type": "http in",
+        "z": "528afbba36988f42",
+        "name": "GET /imm/api/live/:id",
+        "url": "/imm/api/live/:deviceId",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 170,
+        "y": 1060,
+        "wires": [
+            [
+                "db14fbce798b7f76"
+            ]
+        ]
+    },
+    {
+        "id": "db14fbce798b7f76",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Build one device",
+        "func": "const id = msg.req.params.deviceId;\nconst store = global.get('immLiveByDevice') || {};\nconst idUp = String(id || '').toUpperCase();\nlet entry = store[id] || store['m' + id] || store['e:' + idUp];\nif (!entry) {\n  entry = Object.values(store).find((d) =>\n    d.device_id === id ||\n    String(d.machine_id) === String(id) ||\n    String(d.machine_name || '').toUpperCase() === idUp ||\n    String(d.device_name || '').toUpperCase() === idUp\n  );\n}\nif (!entry) {\n  msg.payload = { ok: false, error: 'not found', device_id: id };\n  msg.statusCode = 404;\n} else {\n  msg.payload = { ok: true, device: entry };\n  msg.statusCode = 200;\n}\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 390,
+        "y": 1060,
+        "wires": [
+            [
+                "5a2de5bcad72dda4"
+            ]
+        ]
+    },
+    {
+        "id": "5a2de5bcad72dda4",
+        "type": "http response",
+        "z": "528afbba36988f42",
+        "name": "JSON response",
+        "statusCode": "",
+        "headers": {
+            "content-type": "application/json",
+            "access-control-allow-origin": "*"
+        },
+        "x": 620,
+        "y": 1000,
+        "wires": []
+    },
+    {
+        "id": "37395a3f165796f2",
+        "type": "sie-device-data",
+        "z": "528afbba36988f42",
+        "name": "IMM_07",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.b695f76c-457a-4742-89d3-8950cc1f38a2.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "b695f76c-457a-4742-89d3-8950cc1f38a2",
+        "x": 120,
+        "y": 80,
+        "wires": [
+            [
+                "e862b7f1d083129e"
+            ]
+        ]
+    },
+    {
+        "id": "5c39e23ca746eae3",
+        "type": "sie-device-data",
+        "z": "528afbba36988f42",
+        "name": "IMM_08",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.279cb5fc-18b1-4b7a-8e0c-fde9fc1e8fdf.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "279cb5fc-18b1-4b7a-8e0c-fde9fc1e8fdf",
+        "x": 120,
+        "y": 140,
+        "wires": [
+            [
+                "e862b7f1d083129e"
+            ]
+        ]
+    },
+    {
+        "id": "37139f1e3d901abb",
+        "type": "sie-device-data",
+        "z": "528afbba36988f42",
+        "name": "IMM_09",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.69a56343-e331-4165-85a4-ebcc754d1f84.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "69a56343-e331-4165-85a4-ebcc754d1f84",
+        "x": 120,
+        "y": 200,
+        "wires": [
+            [
+                "e862b7f1d083129e"
+            ]
+        ]
+    },
+    {
+        "id": "d15ac8edf6ea72e7",
+        "type": "sie-device-data",
+        "z": "528afbba36988f42",
+        "name": "IMM_10",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.3a678f1d-1a26-4c2f-a208-a59efbbfd522.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "3a678f1d-1a26-4c2f-a208-a59efbbfd522",
+        "x": 120,
+        "y": 260,
+        "wires": [
+            [
+                "e862b7f1d083129e"
+            ]
+        ]
+    },
+    {
+        "id": "7e862e70a8b6456b",
+        "type": "sie-device-data",
+        "z": "528afbba36988f42",
+        "name": "IMM_11",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.#.e3d7ca17-9f75-43fb-b8c4-c2b389245f63.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "e3d7ca17-9f75-43fb-b8c4-c2b389245f63",
+        "x": 120,
+        "y": 320,
+        "wires": [
+            [
+                "e862b7f1d083129e"
+            ]
+        ]
+    },
+    {
+        "id": "603b119a17dfd019",
+        "type": "sie-device-data",
+        "z": "528afbba36988f42",
+        "name": "PLC_Plastech",
+        "broker": "28778a3f76848bc9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.trx.#.a916642e-1be4-4f54-a9ae-da2a4d074e91.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "a916642e-1be4-4f54-a9ae-da2a4d074e91",
+        "x": 90,
+        "y": 540,
+        "wires": [
+            [
+                "21f86b6d1ff17932"
+            ]
+        ]
+    },
+    {
+        "id": "21f86b6d1ff17932",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Route Plastech by trx.name",
+        "func": "const raw = msg.payload;\nif (!raw || !raw.trx) return null;\n\nconst trxName = String(raw.trx.name || '').trim();\nmsg.topic = trxName;\nmsg.payload = raw;\n\nconst routeIndex = {\n  IMM17: 0,\n  IMM18: 1,\n  PowerFactor: 2,\n  Total_enery_cumulative: 3,\n  Total_energy_cumulative: 3,\n  EM_Current: 4,\n  EM_Voltage: 5\n};\n\nlet outIdx = routeIndex[trxName];\nif (outIdx === undefined) {\n  const n = trxName.toLowerCase().replace(/enery/g, 'energy');\n  if (n === 'powerfactor' || n.includes('power_factor')) outIdx = 2;\n  else if (n.includes('total') && (n.includes('cumul') || n.includes('energy'))) outIdx = 3;\n  else if (n === 'em_current' || n.includes('current')) outIdx = 4;\n  else if (n === 'em_voltage' || n.includes('voltage')) outIdx = 5;\n}\nif (outIdx === undefined) {\n  node.status({ fill: 'yellow', shape: 'ring', text: 'skip ' + trxName });\n  return null;\n}\n\nconst outputs = [null, null, null, null, null, null];\noutputs[outIdx] = msg;\nnode.status({ fill: 'green', shape: 'dot', text: trxName });\nreturn outputs;",
+        "outputs": 6,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 300,
+        "y": 540,
+        "wires": [
+            [
+                "63bfd18e693e3d9e"
+            ],
+            [
+                "63bfd18e693e3d9e"
+            ],
+            [
+                "9071fd7704fe6ed8"
+            ],
+            [
+                "9071fd7704fe6ed8"
+            ],
+            [
+                "9071fd7704fe6ed8"
+            ],
+            [
+                "9071fd7704fe6ed8"
+            ]
+        ]
+    },
+    {
+        "id": "63bfd18e693e3d9e",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Map IMM17/18 status tags",
+        "func": "const DEVICE = 'a916642e-1be4-4f54-a9ae-da2a4d074e91';\nconst p = msg.payload || {};\nconst trx = p.trx || {};\nconst body = trx.body || {};\nconst machine = String(trx.name || msg.topic || '').trim().toUpperCase();\n\nconst boolish = (v) => {\n  const s = String(v).trim().toLowerCase();\n  if (s === 'true' || s === '1' || s === 'on') return 'true';\n  if (s === 'false' || s === '0' || s === 'off') return 'false';\n  return String(v);\n};\n\nconst parameters = {};\nObject.keys(body).forEach((k) => {\n  const v = body[k];\n  if (v === null || v === undefined || v === '') return;\n  parameters[k] = String(v);\n  const lk = k.toLowerCase();\n  if (lk.includes('heater')) parameters.Heater_Status = boolish(v);\n  else if (lk.includes('motor')) parameters.Motor_Status = boolish(v);\n  else if (lk.includes('injection')) parameters.Injection_Status = boolish(v);\n  else if (lk.includes('refill')) parameters.Refilling_Status = boolish(v);\n});\n\nparameters.Connection_Status = 'true';\n\nmsg.payload = {\n  id: p.id,\n  device: p.device || DEVICE,\n  device_name: machine,\n  machine_name: machine,\n  trx: { name: machine, body: parameters },\n  body: parameters,\n  origin: p.origin,\n  ts: p.ts\n};\nmsg.topic = machine;\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 180,
+        "y": 380,
+        "wires": [
+            [
+                "e862b7f1d083129e",
+                "f81536362bcef74b"
+            ]
+        ]
+    },
+    {
+        "id": "9071fd7704fe6ed8",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Map plant energy meter",
+        "func": "const DEVICE = 'a916642e-1be4-4f54-a9ae-da2a4d074e91';\n// Plant energy meter identity — NOT associated with IMM17/IMM18.\n// Map this source to any panel in the Energy Meter dashboard (source machine).\nconst DEFAULT_METERS = ['EM_PLANT'];\nlet ENERGY_METERS = global.get('EAP_ENERGY_METERS');\nif (!Array.isArray(ENERGY_METERS) || !ENERGY_METERS.length) ENERGY_METERS = DEFAULT_METERS;\nENERGY_METERS = ENERGY_METERS.map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);\nif (!ENERGY_METERS.length) ENERGY_METERS = DEFAULT_METERS;\n\nconst p = msg.payload || {};\nconst trx = p.trx || {};\nconst body = trx.body || {};\nconst trxName = String(trx.name || msg.topic || '').trim();\nconst trxNorm = trxName.toLowerCase().replace(/enery/g, 'energy');\n\nconst mapped = {};\nconst set = (k, v) => {\n  if (v === null || v === undefined || v === '') return;\n  mapped[k] = String(v);\n};\n\nconst pick = (...keys) => {\n  for (const k of keys) {\n    if (body[k] !== null && body[k] !== undefined && body[k] !== '') return body[k];\n  }\n  const lower = {};\n  Object.keys(body).forEach((k) => { lower[k.toLowerCase()] = body[k]; });\n  for (const k of keys) {\n    const v = lower[String(k).toLowerCase()];\n    if (v !== null && v !== undefined && v !== '') return v;\n  }\n  return undefined;\n};\n\nif (trxNorm === 'powerfactor' || trxNorm.includes('power_factor')) {\n  set('Energy_Power_Factor', pick('AveragePF', 'AvgPF', 'Avg_PF'));\n  set('Energy_PF1', pick('PowerFactor-PF1', 'PowerFactor_PF1', 'PF1'));\n  set('Energy_PF2', pick('PowerFactor_PF2', 'PF2'));\n  set('Energy_PF3', pick('PowerFactor_PF3', 'PF3'));\n} else if (trxNorm.includes('total') && (trxNorm.includes('cumul') || trxNorm.includes('energy'))) {\n  const active = pick('Total_Active_Energy', 'TotalActiveEnergy', 'Active_Energy', 'Energy_Shift_Kwh');\n  const apparent = pick('Total_Appearent_Energy', 'Total_Apparent_Energy', 'TotalApparentEnergy', 'Energy_Shift_Kvah');\n  const reactive = pick('Total_Reactive_Energy', 'TotalReactiveEnergy', 'Energy_Shift_Kvarh');\n  set('Total_Active_Energy', active);\n  set('Total_Appearent_Energy', apparent);\n  set('Total_Reactive_Energy', reactive);\n  set('Energy_Shift_Kwh', active);\n  set('Energy_Shift_Kvah', apparent);\n  set('Energy_Shift_Kvarh', reactive);\n} else if (trxNorm === 'em_current' || (trxNorm.includes('current') && !trxNorm.includes('voltage'))) {\n  set('Energy_Current_I1', pick('Current_I1', 'I1'));\n  set('Energy_Current_I2', pick('Current_I2', 'I2'));\n  set('Energy_Current_I3', pick('Current_I3', 'I3'));\n  const nums = [pick('Current_I1', 'I1'), pick('Current_I2', 'I2'), pick('Current_I3', 'I3')]\n    .map((x) => Number(x))\n    .filter((n) => Number.isFinite(n));\n  if (nums.length) {\n    set('Energy_Ampere_Rating', (nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(3));\n  }\n} else if (trxNorm === 'em_voltage' || trxNorm.includes('voltage')) {\n  set('Energy_Phase_to_Phase_Voltage', pick('Average_Voltage_LL', 'VLL', 'Avg_VLL'));\n  set('Energy_Phase_to_Neutral_Voltage', pick('Voltage_V1toN', 'V1N'));\n  set('Energy_Voltage_V1N', pick('Voltage_V1toN'));\n  set('Energy_Voltage_V2N', pick('Voltage_V2toN'));\n  set('Energy_Voltage_V3N', pick('Voltage_V3toN'));\n  set('Energy_Voltage_V12', pick('Voltage_V1toV2'));\n  set('Energy_Voltage_V23', pick('Voltage_V2toV3'));\n  set('Energy_Voltage_V13', pick('Voltage_V1toV3'));\n}\n\nif (!Object.keys(mapped).length) {\n  node.warn('Energy map empty for ' + trxName);\n  return null;\n}\n\nconst cache = global.get('immPlantEnergyCache') || {};\nObject.assign(cache, mapped);\ncache._updated_at = new Date().toISOString();\ncache._last_trx = trxName;\ncache._meter = ENERGY_METERS[0];\nglobal.set('immPlantEnergyCache', cache);\n\nnode.status({ fill: 'green', shape: 'dot', text: ENERGY_METERS[0] + ' ' + trxName + ' (' + Object.keys(mapped).length + 'p)' });\n\nreturn ENERGY_METERS.map((meter) => ({\n  topic: 'energy:' + meter,\n  payload: {\n    id: p.id,\n    device: p.device || DEVICE,\n    device_name: meter,\n    machine_name: meter,\n    trx: { name: 'EnergyMeter_' + trxName, body: mapped },\n    body: mapped,\n    origin: p.origin,\n    ts: p.ts\n  }\n}));",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 590,
+        "y": 560,
+        "wires": [
+            [
+                "e862b7f1d083129e",
+                "7c6a318f2ac013c6"
+            ]
+        ]
+    },
+    {
+        "id": "f81536362bcef74b",
+        "type": "debug",
+        "z": "528afbba36988f42",
+        "name": "Plastech machine (debug)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 470,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "7c6a318f2ac013c6",
+        "type": "debug",
+        "z": "528afbba36988f42",
+        "name": "Plastech energy (debug)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 880,
+        "y": 560,
+        "wires": []
+    },
+    {
+        "id": "a1b2c3d4e5f6a7b8",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "Reset all shot counters (manual)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "reset_shot_counters",
+        "payload": "{}",
+        "payloadType": "json",
+        "x": 350,
+        "y": 1000,
+        "wires": [
+            [
+                "b2c3d4e5f6a7b8c9"
+            ]
+        ]
+    },
+    {
+        "id": "b2c3d4e5f6a7b8c9",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Clear EAP_SHOT_STATE",
+        "func": "global.set('EAP_SHOT_STATE', {});\nnode.status({ fill:'yellow', shape:'ring', text:'all shot counters reset ' + new Date().toLocaleTimeString() });\nnode.warn('EAP_SHOT_STATE cleared manually');\nreturn null;",
+        "outputs": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 640,
+        "y": 1000,
+        "wires": []
+    },
+    {
+        "id": "772dff45c9b09801",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "Reset all shot counters (manual)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "reset_shot_counters",
+        "payload": "{}",
+        "payloadType": "json",
+        "x": 130,
+        "y": 1020,
+        "wires": [
+            [
+                "5fe45663a8cac675"
+            ]
+        ]
+    },
+    {
+        "id": "5fe45663a8cac675",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Clear EAP_SHOT_STATE",
+        "func": "global.set('EAP_SHOT_STATE', {});\nnode.status({ fill:'yellow', shape:'ring', text:'all shot counters reset ' + new Date().toLocaleTimeString() });\nnode.warn('EAP_SHOT_STATE cleared manually');\nreturn null;",
+        "outputs": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 420,
+        "y": 1020,
+        "wires": []
+    },
+    {
+        "id": "cbf407477ca5df94",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Shot Counter & CSV Writer",
+        "func": "// ── Shot Counter & CSV Writer ─────────────────────────────────────────────\n// fs and path injected via node libs[] — no require() needed.\n//\n// Writes ONLY to /data/eap_shots  (Node-RED container internal path).\n// On the host this maps to: /mnt/nfs/nodered/data/eap_shots/\n// A host-side cron job copies files to /home/sie/node-red_csv_writer/ every hour.\n//\n// Logic:\n//  - machine_shot_count : any CHANGE in Total_Good_Count → +1\n//  - counter            : increments only when new Total_Good_Count > 0\n//  - Shift A  08:00–20:00  →  /data/eap_shots/ShiftA_YYYY-MM-DD.csv\n//  - Shift B  20:00–08:00  →  /data/eap_shots/ShiftB_YYYY-MM-DD.csv\n//  - Counters reset per machine at each shift boundary.\n\nconst CSV_DIR = '/data/eap_shots';\n\n// ─── helpers ─────────────────────────────────────────────────────────────────\nfunction pad(n) { return String(n).padStart(2, '0'); }\n\nfunction getShiftInfo(now) {\n  const h   = now.getHours();\n  const fmt = (d) =>\n    d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());\n  if (h >= 8 && h < 20) {\n    return { shift: 'A', dateLabel: fmt(now) };\n  }\n  const startDate = new Date(now);\n  if (h < 8) startDate.setDate(startDate.getDate() - 1);\n  return { shift: 'B', dateLabel: fmt(startDate) };\n}\n\nfunction csvFilePath(shift, dateLabel) {\n  return CSV_DIR + '/Shift' + shift + '_' + dateLabel + '.csv';\n}\n\nfunction appendRow(filePath, row) {\n  let isNew = false;\n  try {\n    const stat = fs.statSync(filePath);\n    isNew = stat.size === 0;\n  } catch (e) {\n    isNew = true;\n  }\n  const line = [\n    row.timestamp, row.shift, row.date_label,\n    row.machine_id, row.machine_name,\n    row.total_good_count, row.machine_shot_count, row.counter\n  ].join(',') + '\\n';\n  if (isNew) {\n    fs.writeFileSync(\n      filePath,\n      'timestamp,shift,date_label,machine_id,machine_name,' +\n      'total_good_count,machine_shot_count,counter\\n' + line,\n      'utf8'\n    );\n  } else {\n    fs.appendFileSync(filePath, line, 'utf8');\n  }\n}\n\n// ─── guard ───────────────────────────────────────────────────────────────────\nconst entry = msg.payload;\nif (!entry || !entry.parameters) return null;\n\nconst rawGC = entry.parameters.Total_Good_Count;\nif (rawGC === undefined || rawGC === null || rawGC === '') return null;\n\nconst machineId   = entry.machine_id   !== undefined ? entry.machine_id : null;\nconst machineName = String(entry.machine_name || 'UNKNOWN').trim();\nconst storeKey    = machineId !== null ? ('m' + machineId) : machineName.toUpperCase();\n\nconst now       = new Date();\nconst shiftInfo = getShiftInfo(now);\nconst shiftKey  = shiftInfo.shift + '_' + shiftInfo.dateLabel;\n\n// ─── per-machine persistent state ────────────────────────────────────────────\nconst allState = global.get('EAP_SHOT_STATE') || {};\nlet   st       = allState[storeKey] || { prevGC: null, shotCount: 0, counter: 0, shiftKey: '' };\n\nif (st.shiftKey !== shiftKey) {\n  st.shotCount = 0;\n  st.counter   = 0;\n  st.shiftKey  = shiftKey;\n}\n\nconst newGC  = String(rawGC).trim();\nconst prevGC = st.prevGC;\nlet   shotFired = 0;\n\nif (prevGC !== null && prevGC !== newGC) {\n  shotFired    = 1;\n  st.shotCount += 1;\n  const numGC = parseFloat(newGC);\n  if (Number.isFinite(numGC) && numGC > 0) st.counter += 1;\n}\n\nst.prevGC          = newGC;\nallState[storeKey] = st;\nglobal.set('EAP_SHOT_STATE', allState);\n\n// ─── build row ────────────────────────────────────────────────────────────────\nconst ts = now.getFullYear() + '-' +\n           pad(now.getMonth() + 1) + '-' +\n           pad(now.getDate())      + 'T' +\n           pad(now.getHours())     + ':' +\n           pad(now.getMinutes())   + ':' +\n           pad(now.getSeconds());\n\nconst row = {\n  timestamp          : ts,\n  shift              : shiftInfo.shift,\n  date_label         : shiftInfo.dateLabel,\n  machine_id         : machineId !== null ? machineId : '',\n  machine_name       : machineName,\n  total_good_count   : newGC,\n  machine_shot_count : st.shotCount,\n  counter            : st.counter\n};\n\n// ─── write ────────────────────────────────────────────────────────────────────\ntry {\n  appendRow(csvFilePath(shiftInfo.shift, shiftInfo.dateLabel), row);\n} catch (e) {\n  node.warn('CSV write error: ' + e.message);\n}\n\n// ─── output ───────────────────────────────────────────────────────────────────\nmsg.payload = {\n  machine_id         : machineId,\n  machine_name       : machineName,\n  Total_Good_Count   : newGC,\n  machine_shot_count : st.shotCount,\n  counter            : st.counter,\n  shift              : shiftInfo.shift,\n  shift_date         : shiftInfo.dateLabel,\n  shot_fired         : shotFired\n};\n\nnode.status({\n  fill : shotFired ? 'green' : 'blue',\n  shape: 'dot',\n  text : machineName + ' GC=' + newGC + ' shots=' + st.shotCount + ' ctr=' + st.counter\n});\n\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [
+            {
+                "var": "fs",
+                "module": "fs"
+            },
+            {
+                "var": "path",
+                "module": "path"
+            }
+        ],
+        "x": 420,
+        "y": 40,
+        "wires": [
+            [
+                "02e161b7f24b9d30"
+            ]
+        ]
+    },
+    {
+        "id": "02e161b7f24b9d30",
+        "type": "debug",
+        "z": "528afbba36988f42",
+        "name": "Shot counter output (debug)",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 700,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "53e554edd4af9562",
+        "type": "inject",
+        "z": "528afbba36988f42",
+        "name": "Reset all shot counters (manual)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "reset_shot_counters",
+        "payload": "{}",
+        "payloadType": "json",
+        "x": 130,
+        "y": 1020,
+        "wires": [
+            [
+                "a1078bb5dff9317a"
+            ]
+        ]
+    },
+    {
+        "id": "a1078bb5dff9317a",
+        "type": "function",
+        "z": "528afbba36988f42",
+        "name": "Clear EAP_SHOT_STATE",
+        "func": "global.set('EAP_SHOT_STATE', {});\nnode.status({ fill:'yellow', shape:'ring', text:'all shot counters reset ' + new Date().toLocaleTimeString() });\nnode.warn('EAP_SHOT_STATE cleared manually');\nreturn null;",
+        "outputs": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 420,
+        "y": 1020,
+        "wires": []
+    },
+    {
+        "id": "28778a3f76848bc9",
+        "type": "broker-config",
+        "name": "SIE",
+        "host": "rabbitmq.eda",
+        "port": "5672",
+        "vhost": "",
+        "tls": false,
+        "credsFromSettings": false
+    }
+]
