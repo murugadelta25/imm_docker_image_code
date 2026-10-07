@@ -1224,8 +1224,11 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
         return str(v.get("value_text") or v.get("value_num") or default)
 
     shift_prod = _equipment_shift_production(db, machine_id)
-    # Production Qty / Act Prod = OEE formula (shot × running cavity), shift-scoped
-    prod_qty = int(shift_prod.get("shift_act_prod") or 0)
+    # shift_act_qty: OEE formula (shot × running cavity), shift-scoped — used for UPH calculation
+    shift_act_qty = int(shift_prod.get("shift_act_prod") or 0)
+    # lifetime_act_prod: PLC cumulative counter (Actual_Production_Count) — used for "Act Prod Count" tile
+    lifetime_act_prod_raw = num_or_none("Actual_Production_Count")
+    lifetime_act_prod = int(round(lifetime_act_prod_raw)) if lifetime_act_prod_raw is not None else None
     cycle = num("Actual_Cycle_Time") or num("Last_Cycle_Time") or 0.0
     cavity = float(shift_prod.get("running_cavity") or 0) or num("Actual_Cavity_No") or 0.0
     uph = round(3600.0 / cycle, 1) if cycle > 0 else 0.0
@@ -1278,7 +1281,7 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
             "tool_number": mold_name,
         },
         "production": {
-            "quantity": prod_qty,
+            "quantity": shift_act_qty,
             "uph": uph,
             "total_run_hours": None,
             "actual_ct": cycle,
@@ -1290,7 +1293,7 @@ def equipment_dashboard_summary(machine_id: int, db: Session = Depends(get_db), 
         },
         "prod_counts": {
             "prod_target": lifetime_target_disp,
-            "act_prod": prod_qty,
+            "act_prod": lifetime_act_prod,
             "good": lifetime_good,
             "bad": lifetime_bad,
             "shift_prod_target": shift_prod.get("shift_prod_target"),
