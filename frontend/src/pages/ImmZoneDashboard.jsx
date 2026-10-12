@@ -375,7 +375,6 @@ export default function ImmZoneDashboard() {
     return () => {
       clearTimeout(delayId);
       if (pollId) clearInterval(pollId);
-      clearTimeout(wsDelayRef.current);
     };
   }, [load]);
 
