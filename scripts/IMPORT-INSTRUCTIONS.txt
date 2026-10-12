@@ -1,0 +1,52 @@
+================================================================================
+NODE-RED OFFLINE FLOW - FIXED VERSION - IMPORT INSTRUCTIONS
+================================================================================
+
+ISSUE FIXED:
+  Error: ReferenceError: require is not defined
+  Location: "Check Connection Status" node
+  Status: ✓ RESOLVED
+
+FILE READY:
+  /home/sie/EAP-IMM/eap_imm_pms/scripts/nodered-offline-flow.json
+  
+QUICK IMPORT (3 STEPS):
+  1. Open Node-RED dashboard (http://node-red:1880)
+  2. Click ☰ Menu → Import
+  3. Select: /home/sie/EAP-IMM/eap_imm_pms/scripts/nodered-offline-flow.json
+  4. Click Deploy (red button, top right)
+  5. Wait 10 seconds → "Check Connection Status" should turn green
+
+VERIFY AFTER IMPORT:
+  ✓ No errors in Debug panel (right sidebar)
+  ✓ "Check Connection Status" shows green every 10 seconds
+  ✓ GET http://node-red:1880/imm/api/queue/status returns JSON
+  ✓ Console shows no "require is not defined" errors
+
+CHANGES MADE:
+  Node 1: "Check Connection Status"
+    BEFORE: device_id: 'nodered-' + os.hostname()
+    AFTER:  device_id: 'nodered-health-check'
+
+  Node 2: "Prepare Batch Restore"
+    BEFORE: device_id: 'nodered-' + require('os').hostname()
+    AFTER:  device_id: 'nodered-batch-restore'
+
+TROUBLESHOOTING:
+  • Still seeing error? → Delete old flows, re-import fixed version
+  • No green status? → Check webhook URL in "1 Set EAP webhook URL" node
+  • Queue API 404? → Ensure backend /api/imm/nodered/ endpoints deployed
+  • Localhost? → Update webhook URL from 192.168.1.111 to your backend IP
+
+NEXT STEPS:
+  1. Backend: python3 -c "from app.offline_queue import ensure_offline_tables; ensure_offline_tables()"
+  2. Frontend: Add route /admin/offline-queue → OfflineQueueMonitor
+  3. Test: Run scenarios from OFFLINE-IMPLEMENTATION-GUIDE.md
+  4. Deploy to staging for 1 week monitoring
+
+CONTACT / SUPPORT:
+  Documentation: /home/sie/EAP-IMM/eap_imm_pms/.agents/tasks/OFFLINE-IMPLEMENTATION-GUIDE.md
+  Backend Code: /home/sie/EAP-IMM/eap_imm_pms/backend/app/offline_queue.py
+  Flow Location: /home/sie/EAP-IMM/eap_imm_pms/scripts/nodered-offline-flow.json
+
+================================================================================

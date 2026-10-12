@@ -13,9 +13,12 @@ if not DATABASE_URL:
     raise RuntimeError(f"DATABASE_URL is not set. Check {_env_path}")
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=3600,
+    pool_size=20,  # Maintain 20 connections in pool
+    max_overflow=10,  # Allow up to 10 overflow connections
+    pool_recycle=3600,  # Recycle connections every hour
+    pool_pre_ping=True,  # Test connections before using
     connect_args={"connect_timeout": 10},
+    echo=False,  # Disable SQL logging in production
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

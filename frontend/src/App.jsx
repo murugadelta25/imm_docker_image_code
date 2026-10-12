@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { PlatformAuthProvider } from './context/PlatformAuthContext';
@@ -11,37 +12,57 @@ import FeatureRouteGuard from './components/FeatureRouteGuard';
 import Login from './pages/Login';
 import PlatformLogin from './pages/platform/PlatformLogin';
 import FeatureModulesAdmin from './pages/platform/FeatureModulesAdmin';
-import Dashboard from './pages/Dashboard';
-import ImmDeviceMonitor from './pages/ImmDeviceMonitor';
-import ImmFactoryDashboard from './pages/ImmFactoryDashboard';
-import ImmZoneDashboard from './pages/ImmZoneDashboard';
-import ImmEquipmentDetail from './pages/ImmEquipmentDetail';
-import ImmHistoryList from './pages/ImmHistoryList';
-import ImmKpiDashboard from './pages/ImmKpiDashboard';
-import ImmEnergyDashboard from './pages/ImmEnergyDashboard';
-import DataEntry from './pages/DataEntry';
-import ModelChange from './pages/ModelChange';
-import Breakdown from './pages/Breakdown';
-import MaintenanceDashboard from './pages/MaintenanceDashboard';
-import LossTracker from './pages/LossTracker';
-import ProductionPlanning from './pages/ProductionPlanning';
-import WorkOrderManagement from './pages/WorkOrderManagement';
-import EmailAlerts from './pages/EmailAlerts';
 import { ConfigProvider } from './context/ConfigContext';
-import Configuration from './pages/Configuration';
-import FactorySetup from './pages/FactorySetup';
-import MachineConfig from './pages/MachineConfig';
-import MachineHourlyOutput from './pages/MachineHourlyOutput';
-import UserManagement from './pages/UserManagement';
-import OperatorWorkInstructionDashboard from './pages/OperatorWorkInstructionDashboard';
-import QcApprovals from './pages/QcApprovals';
-import PartManagement from './pages/PartManagement';
-import ToolManagement from './pages/ToolManagement';
 import AutoLogin from './pages/AutoLogin';
-import WorkInstructionRevision from './pages/WorkInstructionRevision';
-import DatabaseManagement from './pages/DatabaseManagement';
-import OperatorManagement from './pages/OperatorManagement';
-import MyWorkHours from './pages/MyWorkHours';
+
+// Lazy-load page components for code splitting
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const ImmDeviceMonitor = lazy(() => import('./pages/ImmDeviceMonitor'));
+const ImmFactoryDashboard = lazy(() => import('./pages/ImmFactoryDashboard'));
+const ImmZoneDashboard = lazy(() => import('./pages/ImmZoneDashboard'));
+const ImmEquipmentDetail = lazy(() => import('./pages/ImmEquipmentDetail'));
+const ImmHistoryList = lazy(() => import('./pages/ImmHistoryList'));
+const ImmKpiDashboard = lazy(() => import('./pages/ImmKpiDashboard'));
+const ImmEnergyDashboard = lazy(() => import('./pages/ImmEnergyDashboard'));
+const DataEntry = lazy(() => import('./pages/DataEntry'));
+const ModelChange = lazy(() => import('./pages/ModelChange'));
+const Breakdown = lazy(() => import('./pages/Breakdown'));
+const MaintenanceDashboard = lazy(() => import('./pages/MaintenanceDashboard'));
+const LossTracker = lazy(() => import('./pages/LossTracker'));
+const ProductionPlanning = lazy(() => import('./pages/ProductionPlanning'));
+const WorkOrderManagement = lazy(() => import('./pages/WorkOrderManagement'));
+const EmailAlerts = lazy(() => import('./pages/EmailAlerts'));
+const Configuration = lazy(() => import('./pages/Configuration'));
+const FactorySetup = lazy(() => import('./pages/FactorySetup'));
+const MachineConfig = lazy(() => import('./pages/MachineConfig'));
+const MachineHourlyOutput = lazy(() => import('./pages/MachineHourlyOutput'));
+const UserManagement = lazy(() => import('./pages/UserManagement'));
+const OperatorWorkInstructionDashboard = lazy(() => import('./pages/OperatorWorkInstructionDashboard'));
+const QcApprovals = lazy(() => import('./pages/QcApprovals'));
+const PartManagement = lazy(() => import('./pages/PartManagement'));
+const ToolManagement = lazy(() => import('./pages/ToolManagement'));
+const WorkInstructionRevision = lazy(() => import('./pages/WorkInstructionRevision'));
+const DatabaseManagement = lazy(() => import('./pages/DatabaseManagement'));
+const OperatorManagement = lazy(() => import('./pages/OperatorManagement'));
+const MyWorkHours = lazy(() => import('./pages/MyWorkHours'));
+
+// Loading fallback component
+function PageLoadingFallback() {
+  return (
+    <div style={{ 
+      display: 'flex', 
+      alignItems: 'center', 
+      justifyContent: 'center', 
+      height: '100vh',
+      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+      color: '#fff',
+      fontSize: '18px',
+      fontFamily: 'system-ui'
+    }}>
+      <div>Loading...</div>
+    </div>
+  );
+}
 
 /** CPLM Root + Outlet pattern — shell wraps all authenticated routes */
 function AuthenticatedShell() {
@@ -68,42 +89,259 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/autologin" element={<AutoLogin />} />
       <Route element={<AuthenticatedShell />}>
-        <Route path="/dashboard" element={<ImmFactoryDashboard />} />
-        <Route path="/imm/zone" element={<ImmZoneDashboard />} />
-        <Route path="/imm/zone/:zoneId" element={<ImmZoneDashboard />} />
-        <Route path="/imm/equipment" element={<ImmDeviceMonitor />} />
+        <Route 
+          path="/dashboard" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ImmFactoryDashboard />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/imm/zone" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ImmZoneDashboard />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/imm/zone/:zoneId" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ImmZoneDashboard />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/imm/equipment" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ImmDeviceMonitor />
+            </Suspense>
+          } 
+        />
         <Route path="/imm/devices" element={<Navigate to="/imm/equipment" replace />} />
-        <Route path="/oee-dashboard" element={<Dashboard />} />
-        <Route path="/imm/equipment/:machineId" element={<ImmEquipmentDetail />} />
-        <Route path="/imm/kpis" element={<ImmKpiDashboard />} />
-        <Route path="/imm/energy" element={<ImmEnergyDashboard />} />
+        <Route 
+          path="/oee-dashboard" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <Dashboard />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/imm/equipment/:machineId" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ImmEquipmentDetail />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/imm/kpis" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ImmKpiDashboard />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/imm/energy" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ImmEnergyDashboard />
+            </Suspense>
+          } 
+        />
         <Route path="/imm/history" element={<Navigate to="/imm/kpis" replace />} />
         <Route path="/imm/history/transfer-rate" element={<Navigate to="/imm/kpis" replace />} />
         <Route path="/imm/history/hit-rate" element={<Navigate to="/imm/kpis" replace />} />
         <Route path="/imm/history/equipment-parameter" element={<Navigate to="/imm/kpis" replace />} />
-        <Route path="/imm/history/records" element={<ImmHistoryList />} />
-        <Route path="/planning" element={<ProductionPlanning />} />
-        <Route path="/work-orders" element={<WorkOrderManagement />} />
-        <Route path="/entry" element={<DataEntry />} />
-        <Route path="/model-change" element={<ModelChange />} />
-        <Route path="/breakdown" element={<Breakdown />} />
-        <Route path="/maintenance" element={<MaintenanceDashboard />} />
-        <Route path="/loss-tracker" element={<LossTracker />} />
-        <Route path="/alerts/email" element={<EmailAlerts />} />
-        <Route path="/factory-setup" element={<FactorySetup />} />
-        <Route path="/config" element={<Configuration />} />
-        <Route path="/machines" element={<MachineConfig />} />
-        <Route path="/hourly-output" element={<MachineHourlyOutput />} />
-        <Route path="/work-instructions" element={<OperatorWorkInstructionDashboard />} />
-        <Route path="/qc-approvals" element={<QcApprovals />} />
-        <Route path="/parts" element={<PartManagement />} />
-        <Route path="/tools" element={<ToolManagement />} />
-        <Route path="/molds" element={<ToolManagement />} />
-        <Route path="/wi-revisions" element={<WorkInstructionRevision />} />
-        <Route path="/users" element={<UserManagement />} />
-        <Route path="/operators" element={<OperatorManagement />} />
-        <Route path="/my-work-hours" element={<MyWorkHours />} />
-        <Route path="/database-management" element={<DatabaseManagement />} />
+        <Route 
+          path="/imm/history/records" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ImmHistoryList />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/planning" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ProductionPlanning />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/work-orders" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <WorkOrderManagement />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/entry" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <DataEntry />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/model-change" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ModelChange />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/breakdown" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <Breakdown />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/maintenance" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <MaintenanceDashboard />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/loss-tracker" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <LossTracker />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/alerts/email" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <EmailAlerts />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/factory-setup" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <FactorySetup />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/config" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <Configuration />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/machines" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <MachineConfig />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/hourly-output" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <MachineHourlyOutput />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/work-instructions" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <OperatorWorkInstructionDashboard />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/qc-approvals" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <QcApprovals />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/parts" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <PartManagement />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/tools" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ToolManagement />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/molds" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <ToolManagement />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/wi-revisions" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <WorkInstructionRevision />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/users" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <UserManagement />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/operators" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <OperatorManagement />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/my-work-hours" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <MyWorkHours />
+            </Suspense>
+          } 
+        />
+        <Route 
+          path="/database-management" 
+          element={
+            <Suspense fallback={<PageLoadingFallback />}>
+              <DatabaseManagement />
+            </Suspense>
+          } 
+        />
         <Route path="*" element={<Navigate to="/dashboard" />} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/dashboard' : '/login'} />} />

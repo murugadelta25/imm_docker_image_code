@@ -26,6 +26,23 @@ const api = axios.create({
 api.interceptors.request.use(cfg => {
   const token = localStorage.getItem('token');
   if (token) cfg.headers.Authorization = `Bearer ${token}`;
+  
+  // Per-endpoint timeout strategy
+  if (!cfg.timeout) {
+    const url = cfg.url || '';
+    // Fast endpoints (should respond <5s): factory dashboards, trends
+    if (url.includes('/factory') || url.includes('/running-rate-trend')) {
+      cfg.timeout = 5000; // 5 sec timeout for heavy aggregations
+    }
+    // Medium endpoints (should respond <10s): zones, equipment
+    else if (url.includes('/zones') || url.includes('/equipment')) {
+      cfg.timeout = 10000; // 10 sec for zone/equipment queries
+    }
+    // Default for other endpoints: 30 sec
+    else {
+      cfg.timeout = 30000;
+    }
+  }
   return cfg;
 });
 

@@ -249,9 +249,35 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
+        import asyncio
+        import json
+        
         while True:
-            await websocket.receive_text()
+            try:
+                # Receive with 25-second timeout (less than browser's 30s default)
+                # This allows us to send periodic keep-alive pings
+                data = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=25.0
+                )
+                try:
+                    msg = json.loads(data)
+                    # If client sends pong response, just continue
+                    if msg.get("type") == "pong":
+                        continue
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            except asyncio.TimeoutError:
+                # No data for 25 seconds — send keep-alive ping
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    break
+                continue
     except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as exc:
+        print(f"[DEBUG] WebSocket error: {exc}")
         manager.disconnect(websocket)
 
 @app.get("/health")

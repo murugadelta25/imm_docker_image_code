@@ -99,26 +99,26 @@ def parameters_to_samples(parameters: Dict[str, Any]) -> List[dict]:
 
 
 def find_machine_for_device(db: Session, device_id: str, device_name: str = "") -> Optional[Machine]:
+    """Find machine by device UUID or name with optimized single query."""
+    from sqlalchemy import or_
+    
     device_id = (device_id or "").strip()
     device_name = (device_name or DEVICE_LABELS.get(device_id) or "").strip()
+    
+    # Build conditions for a single optimized query
+    conditions = []
     if device_id:
-        m = (
-            db.query(Machine)
-            .filter(
-                (Machine.plc_topic == device_id)
-                | (Machine.plc_endpoint == device_id)
-            )
-            .first()
-        )
-        if m:
-            return m
+        conditions.append(Machine.plc_topic == device_id)
+        conditions.append(Machine.plc_endpoint == device_id)
     if device_name:
-        for m in db.query(Machine).all():
-            if (m.name or "").strip().upper() == device_name.upper():
-                return m
-            if device_name.upper().replace("_", "") in (m.name or "").upper().replace("_", ""):
-                return m
-    return None
+        conditions.append(Machine.name.ilike(f"%{device_name}%"))
+    
+    if not conditions:
+        return None
+    
+    # Single query with OR conditions instead of multiple queries
+    m = db.query(Machine).filter(or_(*conditions)).first()
+    return m
 
 
 def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = None) -> dict:
@@ -198,27 +198,39 @@ def ingest_device_entry(db: Session, entry: dict, machine: Optional[Machine] = N
             from .models import ImmMold, ImmShotEvent, now_ist
             from .tool_service import apply_shot_mold_usage
 
-            active_mold = (
-                db.query(ImmMold)
-                .filter(ImmMold.machine_id == m.id, ImmMold.is_active == 1)
-                .first()
-            )
+            active_mold_id = None
+            try:
+                active_mold = (
+                    db.query(ImmMold)
+                    .filter(ImmMold.machine_id == m.id, ImmMold.is_active == 1)
+                    .first()
+                )
+                active_mold_id = int(active_mold.id) if active_mold else None
+            except Exception:
+                pass
+
             n_shots = 1
             try:
                 n_shots = max(1, int(float(shot_raw)))
             except (TypeError, ValueError):
                 n_shots = 1
-            for _ in range(n_shots):
-                db.add(
-                    ImmShotEvent(
-                        machine_id=m.id,
-                        recorded_at=now_ist(),
-                        mode=(shot_mode or "nodered")[:40],
-                        source="nodered",
-                        notes="EAP_Shot_Event from Node-RED",
-                        mold_id=int(active_mold.id) if active_mold else None,
-                    )
+
+            # Batch create shot events using add_all (more efficient than loop)
+            now = now_ist()
+            shot_events = [
+                ImmShotEvent(
+                    machine_id=m.id,
+                    recorded_at=now,
+                    mode=(shot_mode or "nodered")[:40],
+                    source="nodered",
+                    notes="EAP_Shot_Event from Node-RED",
+                    mold_id=active_mold_id,
                 )
+                for _ in range(n_shots)
+            ]
+            db.add_all(shot_events)  # Batch add is more efficient than loop
+            db.flush()  # Flush without full commit to maintain transaction
+
             mold_usage = apply_shot_mold_usage(db, m.id, n_shots, source="nodered")
             db.commit()
             result["shots_detected"] = int(result.get("shots_detected") or 0) + n_shots

@@ -34,8 +34,8 @@ from .imm_monitor import _map_imm_status, _map_kpiv_status
 
 router = APIRouter(prefix="/api/imm/dashboard", tags=["imm-dashboard"])
 
-# Short TTL cache — Factory/Zone/Equipment UIs poll often; avoid rebuilding every hit.
-_FACTORY_CACHE_TTL_SEC = 3.0
+# Aggressive cache — Factory/Zone dashboards benefit from longer TTL during rapid polling
+_FACTORY_CACHE_TTL_SEC = 15.0
 _factory_cache_lock = threading.Lock()
 _factory_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
 _plan_sync_lock = threading.Lock()
@@ -928,8 +928,9 @@ def _factory_dashboard_data(db: Session, *, use_cache: bool = True) -> dict:
 
 
 def _zones_list_payload(db: Session) -> dict:
-    """Lightweight zone picker — uses cached factory data when warm."""
+    """Lightweight zone picker — cached factory data."""
     data = _factory_dashboard_data(db, use_cache=True)
+    # Extract just the fields needed for zone selector
     return {
         "site_label": data["site_label"],
         "factory_name": data.get("factory_name") or data["site_label"],
@@ -955,6 +956,30 @@ def _zones_list_payload(db: Session) -> dict:
 @router.get("/factory")
 def factory_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
     return _factory_dashboard_data(db)
+
+
+@router.get("/factory/summary")
+def factory_summary(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Lightweight factory summary — zones and counts only, no machine details."""
+    data = _factory_dashboard_data(db, use_cache=True)
+    # Return only essential fields for fast UI render
+    return {
+        "site_label": data.get("site_label"),
+        "factory_name": data.get("factory_name"),
+        "factories": data.get("factories") or [],
+        "zones": [
+            {
+                "id": z["id"],
+                "name": z["name"],
+                "factory_id": z.get("factory_id"),
+                "factory_name": z.get("factory_name"),
+                "running": z.get("running", 0),
+                "total": z.get("total", 0),
+                "running_pct": z.get("running_pct", 0),
+            }
+            for z in (data.get("zones") or [])
+        ],
+    }
 
 
 @router.get("/factory/running-rate-trend")

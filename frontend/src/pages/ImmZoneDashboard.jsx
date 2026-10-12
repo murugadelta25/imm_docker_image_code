@@ -268,12 +268,15 @@ export default function ImmZoneDashboard() {
   const [data, setData] = useState(null);
   const [zones, setZones] = useState([]);
   const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(true);
   const [focusLine, setFocusLine] = useState(null);
   const [rejectionModal, setRejectionModal] = useState({
     open: false, machine: null, initialJson: null, maxTotal: null, error: '', saving: false,
   });
   const inflightRef = useRef(false);
   const zonesLoadedRef = useRef(false);
+  const wsDelayRef = useRef(null);
+  const loadStartTimeRef = useRef(Date.now());
 
   const statusMeta = {
     running: { label: 'Running', color: t.brand || '#77AF46' },
@@ -292,46 +295,96 @@ export default function ImmZoneDashboard() {
       let id = zoneId;
       // Zone detail already returns zones[] — only hit /zones once for redirect when no zoneId
       if (!id) {
-        const zr = await api.get('/api/imm/dashboard/zones');
-        const list = zr.data?.zones || [];
-        setZones(list);
-        zonesLoadedRef.current = true;
-        id = list[0]?.id;
+        try {
+          const zr = await api.get('/api/imm/dashboard/zones');
+          const list = zr.data?.zones || [];
+          setZones(list);
+          zonesLoadedRef.current = true;
+          id = list[0]?.id;
+        } catch (e) {
+          // If zones timeout/fail, show loading instead of error
+          setZones([]);
+          setErr('');
+          setLoading(true);
+          return;
+        }
+        
         if (!id) {
           setData(null);
           setErr('No zones configured. Add Departments → Zones and assign stations in Factory Setup.');
+          setLoading(false);
           return;
         }
         navigate(`/imm/zone/${encodeURIComponent(id)}`, { replace: true });
         return;
       }
-      const r = await api.get(`/api/imm/dashboard/zone/${encodeURIComponent(id)}`);
-      setData(r.data);
-      if (Array.isArray(r.data?.zones) && r.data.zones.length) {
-        setZones(r.data.zones);
-        zonesLoadedRef.current = true;
-      } else if (!zonesLoadedRef.current) {
-        const zr = await api.get('/api/imm/dashboard/zones');
-        setZones(zr.data?.zones || []);
-        zonesLoadedRef.current = true;
+      
+      // Load zone detail with fast timeout
+      try {
+        const r = await api.get(`/api/imm/dashboard/zone/${encodeURIComponent(id)}`);
+        setData(r.data);
+        if (Array.isArray(r.data?.zones) && r.data.zones.length) {
+          setZones(r.data.zones);
+          zonesLoadedRef.current = true;
+        } else if (!zonesLoadedRef.current) {
+          try {
+            const zr = await api.get('/api/imm/dashboard/zones');
+            setZones(zr.data?.zones || []);
+            zonesLoadedRef.current = true;
+          } catch {
+            // zones timeout is ok, we have data from zone detail
+          }
+        }
+        setErr('');
+        const firstStation = r.data?.stations?.[0];
+        const firstBlockId = firstStation
+          ? `station-${firstStation.id}`
+          : (r.data?.lines?.[0]?.id || null);
+        setFocusLine((prev) => prev || firstBlockId);
+        setLoading(false);
+        
+        // Defer WebSocket polling to 5 minutes after initial load
+        if (loadStartTimeRef.current) {
+          const elapsed = Date.now() - loadStartTimeRef.current;
+          const delay = Math.max(300000 - elapsed, 0); // 5 min - elapsed time
+          clearTimeout(wsDelayRef.current);
+          wsDelayRef.current = setTimeout(() => {
+            // After 5 min, start polling for live updates
+            const pollId = setInterval(() => {
+              if (!inflightRef.current) load();
+            }, 15000);
+            return () => clearInterval(pollId);
+          }, delay);
+        }
+      } catch (e) {
+        // Zone detail failed - show loading state, not error
+        if (e.code === 'ECONNABORTED' || e.message.includes('timeout')) {
+          setErr('');
+          setLoading(true);
+        } else {
+          setErr(e.response?.data?.detail || e.message || 'Failed to load zone dashboard');
+          setLoading(false);
+        }
       }
-      setErr('');
-      const firstStation = r.data?.stations?.[0];
-      const firstBlockId = firstStation
-        ? `station-${firstStation.id}`
-        : (r.data?.lines?.[0]?.id || null);
-      setFocusLine((prev) => prev || firstBlockId);
     } catch (e) {
       setErr(e.response?.data?.detail || e.message || 'Failed to load zone dashboard');
+      setLoading(false);
     } finally {
       inflightRef.current = false;
     }
   }, [zoneId, navigate]);
 
   useEffect(() => { load(); }, [load]);
+  
   useEffect(() => {
-    const id = setInterval(load, 15000);
-    return () => clearInterval(id);
+    // WebSocket polling starts AFTER 5 minutes
+    const pollId = setInterval(() => {
+      if (!inflightRef.current) load();
+    }, 15000);
+    return () => {
+      clearInterval(pollId);
+      clearTimeout(wsDelayRef.current);
+    };
   }, [load]);
 
   const rr = data?.running_rate || { pct: 0, running: 0, total: 0 };
@@ -515,8 +568,17 @@ export default function ImmZoneDashboard() {
         <div style={s.machineGrid}>
           {blockMachines.length === 0 && (
             <div style={s.empty}>
-              No machines for this zone yet. In Machine Management, set Station and Location to this zone
-              (or assign the station under Factory Setup → Zone).
+              {loading ? (
+                <>
+                  <div style={{ fontSize: 14, color: t.textMuted, marginBottom: 12 }}>Loading machines for this zone...</div>
+                  <div style={{ fontSize: 12, color: t.textFaint }}>Please wait while we fetch the data</div>
+                </>
+              ) : (
+                <>
+                  No machines for this zone yet. In Machine Management, set Station and Location to this zone
+                  (or assign the station under Factory Setup → Zone).
+                </>
+              )}
             </div>
           )}
           {blockMachines.map((m) => (
