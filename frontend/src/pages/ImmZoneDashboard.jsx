@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import api from '../api/client';
+import { cachedGet } from '../api/cache';
+import cacheService from '../api/cache';
 import { assetUrl } from '../api/config';
 import PageHeader from '../components/PageHeader';
 import ImmDashboardSelector from '../components/ImmDashboardSelector';
@@ -294,8 +296,8 @@ export default function ImmZoneDashboard() {
       // Zone detail already returns zones[] — only hit /zones once for redirect when no zoneId
       if (!id) {
         try {
-          const zr = await api.get('/api/imm/dashboard/zones');
-          const list = zr.data?.zones || [];
+          const zrResult = await cachedGet(api, '/api/imm/dashboard/zones');
+          const list = zrResult.data?.zones || [];
           setZones(list);
           zonesLoadedRef.current = true;
           id = list[0]?.id;
@@ -317,27 +319,27 @@ export default function ImmZoneDashboard() {
         return;
       }
       
-      // Load zone detail with fast timeout
+      // Load zone detail with cache
       try {
-        const r = await api.get(`/api/imm/dashboard/zone/${encodeURIComponent(id)}`);
-        setData(r.data);
-        if (Array.isArray(r.data?.zones) && r.data.zones.length) {
-          setZones(r.data.zones);
+        const result = await cachedGet(api, `/api/imm/dashboard/zone/${encodeURIComponent(id)}`);
+        setData(result.data);
+        if (Array.isArray(result.data?.zones) && result.data.zones.length) {
+          setZones(result.data.zones);
           zonesLoadedRef.current = true;
         } else if (!zonesLoadedRef.current) {
           try {
-            const zr = await api.get('/api/imm/dashboard/zones');
-            setZones(zr.data?.zones || []);
+            const zrResult = await cachedGet(api, '/api/imm/dashboard/zones');
+            setZones(zrResult.data?.zones || []);
             zonesLoadedRef.current = true;
           } catch {
             // zones timeout is ok, we have data from zone detail
           }
         }
         setErr('');
-        const firstStation = r.data?.stations?.[0];
+        const firstStation = result.data?.stations?.[0];
         const firstBlockId = firstStation
           ? `station-${firstStation.id}`
-          : (r.data?.lines?.[0]?.id || null);
+          : (result.data?.lines?.[0]?.id || null);
         setFocusLine((prev) => prev || firstBlockId);
         setLoading(false);
         
@@ -361,6 +363,14 @@ export default function ImmZoneDashboard() {
   }, [zoneId, navigate]);
 
   useEffect(() => { load(); }, [load]);
+  
+  const handleRefresh = useCallback(() => {
+    // Invalidate cache on manual refresh
+    cacheService.invalidate('/api/imm/dashboard/zones');
+    cacheService.invalidate('/api/imm/dashboard/zone');
+    setLoading(true);
+    load();
+  }, [load]);
   
   useEffect(() => {
     // Don't poll immediately - only after initial load completes
@@ -479,7 +489,7 @@ export default function ImmZoneDashboard() {
             onZoneChange={(id) => navigate(`/imm/zone/${encodeURIComponent(id)}`)}
           />
         )}
-        onRefresh={load}
+        onRefresh={handleRefresh}
       />
       {err && <div style={s.alert}>{err}</div>}
 
