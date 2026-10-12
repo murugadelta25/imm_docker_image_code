@@ -38,9 +38,17 @@ api.interceptors.request.use(cfg => {
     else if (url.includes('/zones') || url.includes('/equipment')) {
       cfg.timeout = 10000; // 10 sec for zone/equipment queries
     }
-    // Default for other endpoints: 30 sec
+    // Dashboard/OEE endpoints: 8 sec (quick fail)
+    else if (url.includes('/dashboard') || url.includes('/oee')) {
+      cfg.timeout = 8000;
+    }
+    // Health checks / light queries: 5 sec
+    else if (url.includes('/health') || url.includes('/status')) {
+      cfg.timeout = 5000;
+    }
+    // Default for other endpoints: 15 sec (reduced from 30)
     else {
-      cfg.timeout = 30000;
+      cfg.timeout = 15000;
     }
   }
   return cfg;

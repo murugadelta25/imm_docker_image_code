@@ -275,8 +275,6 @@ export default function ImmZoneDashboard() {
   });
   const inflightRef = useRef(false);
   const zonesLoadedRef = useRef(false);
-  const wsDelayRef = useRef(null);
-  const loadStartTimeRef = useRef(Date.now());
 
   const statusMeta = {
     running: { label: 'Running', color: t.brand || '#77AF46' },
@@ -343,19 +341,7 @@ export default function ImmZoneDashboard() {
         setFocusLine((prev) => prev || firstBlockId);
         setLoading(false);
         
-        // Defer WebSocket polling to 5 minutes after initial load
-        if (loadStartTimeRef.current) {
-          const elapsed = Date.now() - loadStartTimeRef.current;
-          const delay = Math.max(300000 - elapsed, 0); // 5 min - elapsed time
-          clearTimeout(wsDelayRef.current);
-          wsDelayRef.current = setTimeout(() => {
-            // After 5 min, start polling for live updates
-            const pollId = setInterval(() => {
-              if (!inflightRef.current) load();
-            }, 15000);
-            return () => clearInterval(pollId);
-          }, delay);
-        }
+        // WebSocket polling will be managed by useEffect below
       } catch (e) {
         // Zone detail failed - show loading state, not error
         if (e.code === 'ECONNABORTED' || e.message.includes('timeout')) {
@@ -377,12 +363,18 @@ export default function ImmZoneDashboard() {
   useEffect(() => { load(); }, [load]);
   
   useEffect(() => {
-    // WebSocket polling starts AFTER 5 minutes
-    const pollId = setInterval(() => {
-      if (!inflightRef.current) load();
-    }, 15000);
+    // Don't poll immediately - only after initial load completes
+    let pollId = null;
+    const delayId = setTimeout(() => {
+      // After 5 minutes, start polling every 30 seconds (not 15s)
+      pollId = setInterval(() => {
+        if (!inflightRef.current) load();
+      }, 30000);
+    }, 300000); // 5 minutes
+    
     return () => {
-      clearInterval(pollId);
+      clearTimeout(delayId);
+      if (pollId) clearInterval(pollId);
       clearTimeout(wsDelayRef.current);
     };
   }, [load]);
