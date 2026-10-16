@@ -1,0 +1,207 @@
+================================================================================
+  EAP PMS — OEE DASHBOARD FORMULAS
+================================================================================
+
+Source of truth (application code):
+  - Backend : backend/app/routers/oee.py  →  calculate_oee()
+  - Frontend: frontend/src/pages/DataEntry.jsx  →  calcPreview() (live preview)
+  - Dashboard: frontend/src/pages/Dashboard.jsx  →  displays values from API
+                (no separate OEE calculation on the dashboard)
+
+All time inputs below are in MINUTES unless stated otherwise.
+Cycle time (CT) is in SECONDS.
+
+================================================================================
+1. INPUT FIELDS (per shift / station / machine entry)
+================================================================================
+
+Time window
+  - total_minutes      Total shift duration (minutes)
+  - start_time         Shift start (HH:MM)
+  - stop_time          Shift end (HH:MM)
+
+Cycle time components
+  - process_time       Process time per part (seconds)
+  - loading_unloading  Loading & unloading time per part (seconds)
+
+Scheduled breaks (minutes)
+  - lunch_break
+  - tea_break
+  - tpm_cleaning
+  - other_cleaning
+  - management_meeting
+
+Management / planned losses (minutes)
+  - no_load
+  - new_model_trial
+  - power_cut
+  - planned_maintenance
+  - no_manpower_planned
+
+Downtime losses (minutes)
+  - setting_time
+  - tool_change
+  - dimension_correction
+  - scrap_removal
+  - break_down
+
+Production quantities
+  - actual_qty         Parts produced in the shift
+  - defect_qty         Defective parts (QC update)
+
+================================================================================
+2. INTERMEDIATE CALCULATIONS
+================================================================================
+
+Cycle Time (CT) — seconds per part
+  CT = process_time + loading_unloading
+
+Total Breaks — minutes
+  Total Breaks = lunch_break + tea_break + tpm_cleaning
+               + other_cleaning + management_meeting
+
+Shift Working Minutes — minutes
+  Shift Working Min = total_minutes − Total Breaks
+
+Management Loss Total — minutes
+  Mgmt Loss = no_load + new_model_trial + power_cut
+            + planned_maintenance + no_manpower_planned
+
+Available Shift Time — minutes
+  Available Shift Time = Shift Working Min − Mgmt Loss
+
+Total Down Time — minutes
+  Total Down Time = setting_time + tool_change + dimension_correction
+                  + scrap_removal + break_down
+
+Operating Time — minutes
+  Operating Time = Available Shift Time − Total Down Time
+
+Possible Quantity — parts
+  Possible Qty = floor( (Operating Time × 60) / CT )     if CT > 0
+               = 0                                       if CT = 0
+
+  Note: Operating Time is in minutes; CT is in seconds.
+        Multiply operating minutes by 60 to convert to seconds before dividing.
+
+Production Loss — parts
+  Production Loss = max(0, Possible Qty − Actual Qty)
+
+Accepted Quantity — parts
+  Accepted Qty (accp_qty) = max(0, Actual Qty − Defect Qty)
+
+================================================================================
+3. OEE METRICS (displayed on Production Dashboard)
+================================================================================
+
+AR — Availability Rate (%)
+  AR = (Operating Time / Available Shift Time) × 100
+
+  If Available Shift Time = 0  →  AR = 0
+
+  Meaning: Percentage of available shift time that was spent operating
+           (not lost to downtime).
+
+PR — Performance Rate (%)
+  PR = (Actual Qty / Possible Qty) × 100
+
+  If Possible Qty = 0  →  PR = 0
+
+  Meaning: How much was produced compared to what was theoretically possible
+           at the given cycle time during operating time.
+
+QR — Quality Rate (%)
+  QR = (Accepted Qty / Actual Qty) × 100
+
+  If Actual Qty = 0  →  QR = 0
+
+  Meaning: Percentage of produced parts that are good (non-defective).
+
+OEE — Overall Equipment Effectiveness (%)
+  OEE = (AR × PR × QR) / 10000
+
+  Equivalent form:
+  OEE = (AR / 100) × (PR / 100) × (QR / 100) × 100
+
+  All three rates (AR, PR, QR) are stored and displayed as percentages (0–100).
+  Dividing by 10000 converts the product of three percentages back to a
+  single percentage value.
+
+  Example:
+    AR = 98.53%,  PR = 100.75%,  QR = 99.63%
+    OEE = (98.53 × 100.75 × 99.63) / 10000 = 98.90%
+
+================================================================================
+4. ROUNDING
+================================================================================
+
+  AR, PR, QR  →  rounded to 2 decimal places
+  OEE         →  rounded to 2 decimal places
+  Possible Qty → integer (floor/truncation toward zero in backend)
+
+================================================================================
+5. DASHBOARD SUMMARY (aggregated cards & charts)
+================================================================================
+
+The Production Dashboard calls GET /api/oee/summary and shows:
+
+  avg_ar   = arithmetic mean of AR across filtered OEE entries
+  avg_pr   = arithmetic mean of PR across filtered OEE entries
+  avg_qr   = arithmetic mean of QR across filtered OEE entries
+  avg_oee  = arithmetic mean of OEE across filtered OEE entries
+
+  total_actual  = sum of actual_qty
+  total_accp    = sum of accp_qty
+  total_defect  = sum of defect_qty
+  count         = number of entries in the filter
+
+Note: Summary averages are simple means of per-entry AR/PR/QR/OEE values,
+      NOT a recomputed OEE from aggregated totals.
+
+================================================================================
+6. QC DEFECT UPDATE (recalculates QR and OEE only)
+================================================================================
+
+When defect quantity is updated via PATCH /api/oee/{id}/defect:
+
+  AR and PR remain unchanged (from original entry).
+
+  New Accepted Qty = max(0, Actual Qty − New Defect Qty)
+  New QR           = (New Accepted Qty / Actual Qty) × 100
+  New OEE          = (AR × PR × New QR) / 10000
+
+================================================================================
+7. DASHBOARD TABLE COLUMNS (per entry row)
+================================================================================
+
+  CT (Cycle Time)     = process_time + loading_unloading  (seconds)
+  Avail (min)         = Available Shift Time
+  Op Time             = Operating Time
+  Possible            = Possible Qty
+  Actual              = actual_qty
+  Prod Loss           = max(0, Possible Qty − Actual Qty)
+  Accp                = accp_qty
+  Defect              = defect_qty
+  AR%                 = AR
+  PR%                 = PR
+  QR%                 = QR
+  OEE%                = OEE
+
+================================================================================
+8. STANDARD OEE TERMINOLOGY MAPPING
+================================================================================
+
+  This application uses plant-specific naming:
+
+  AR  =  Availability  (Operating Time / Planned Production Time*)
+  PR  =  Performance  (Actual Output / Theoretical Output)
+  QR  =  Quality      (Good Output / Actual Output)
+  OEE =  Availability × Performance × Quality
+
+  * "Available Shift Time" in this system is shift working time minus
+    management/planned losses (no-load, trials, power cut, etc.), then
+    operating time subtracts downtime (setting, tool change, breakdown, etc.).
+
+================================================================================
+  Document generated from EAP PMS codebase — Production Dashboard / OEE module
+================================================================================

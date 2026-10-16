@@ -1,0 +1,8 @@
+{
+  "domain": "din.eappms",
+  "lanIp": "",
+  "dnsEnabled": true,
+  "useHttps": false,
+  "sslCert": "/etc/ssl/certs/din.eappms.crt",
+  "sslKey": "/etc/ssl/private/din.eappms.key"
+}

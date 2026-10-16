@@ -1,0 +1,249 @@
+{
+  "$schema": "Feature registry — add new pages here only; nav, routes, and /platform/modules auto-update.",
+  "version": 1,
+  "standalone": [
+    {
+      "id": "oee_dashboard",
+      "label": "OEE Dashboard",
+      "path": "/oee-dashboard",
+      "navIcon": "dashboard",
+      "alwaysEnabled": true
+    }
+  ],
+  "groups": [
+    {
+      "id": "imm",
+      "label": "IMM Dashboards",
+      "navIcon": "dashboard",
+      "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+      "items": [
+        {
+          "id": "imm.factory",
+          "label": "Factory Dashboard",
+          "path": "/dashboard",
+          "navIcon": "dashboard",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        },
+        {
+          "id": "imm.zone",
+          "label": "Zone Dashboard",
+          "path": "/imm/zone",
+          "navIcon": "dashboard",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        },
+        {
+          "id": "imm.equipment",
+          "label": "Equipment Dashboard",
+          "path": "/imm/equipment",
+          "navIcon": "machines",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        },
+        {
+          "id": "imm.kpis",
+          "label": "IMM KPI's Dashboard",
+          "path": "/imm/kpis",
+          "navIcon": "hourlyOutput",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        },
+        {
+          "id": "imm.energy",
+          "label": "Energy Meter",
+          "path": "/imm/energy",
+          "navIcon": "dashboard",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance", "quality"],
+          "alwaysEnabled": true
+        }
+      ]
+    },
+    {
+      "id": "production",
+      "label": "Production",
+      "navIcon": "production",
+      "roles": ["admin", "superadmin", "supervisor", "operator"],
+      "items": [
+        {
+          "id": "production.work_orders",
+          "label": "Work Orders",
+          "path": "/work-orders",
+          "navIcon": "workOrders",
+          "roles": ["admin", "superadmin", "supervisor", "operator"]
+        },
+        {
+          "id": "production.planning",
+          "label": "Planning",
+          "path": "/planning",
+          "navIcon": "planning",
+          "roles": ["admin", "superadmin", "supervisor", "operator"]
+        },
+        {
+          "id": "production.data_entry",
+          "label": "Data Entry",
+          "path": "/entry",
+          "navIcon": "entry",
+          "roles": ["admin", "superadmin", "supervisor", "operator"]
+        },
+        {
+          "id": "production.hourly_output",
+          "label": "Hourly Output",
+          "path": "/hourly-output",
+          "navIcon": "hourlyOutput",
+          "roles": ["admin", "superadmin", "supervisor", "operator"]
+        },
+        {
+          "id": "production.model_change",
+          "label": "Model Change",
+          "path": "/model-change",
+          "navIcon": "modelChange",
+          "roles": ["admin", "superadmin", "supervisor", "operator"]
+        }
+      ]
+    },
+    {
+      "id": "qc",
+      "label": "QC",
+      "navIcon": "qc",
+      "roles": ["admin", "superadmin", "supervisor", "operator", "quality"],
+      "items": [
+        {
+          "id": "qc.approvals",
+          "label": "QC Approvals",
+          "path": "/qc-approvals",
+          "navIcon": "workInstructions",
+          "roles": ["admin", "superadmin", "supervisor", "quality", "operator"]
+        },
+        {
+          "id": "qc.work_instructions",
+          "label": "Work Instructions",
+          "path": "/work-instructions",
+          "navIcon": "workInstructions"
+        }
+      ]
+    },
+    {
+      "id": "maintenance",
+      "label": "Maintenance",
+      "navIcon": "maintenance",
+      "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"],
+      "items": [
+        {
+          "id": "maintenance.breakdown",
+          "label": "Breakdown",
+          "path": "/breakdown",
+          "navIcon": "breakdown",
+          "roles": ["admin", "superadmin", "supervisor", "operator"]
+        },
+        {
+          "id": "maintenance.dashboard",
+          "label": "Maintenance",
+          "path": "/maintenance",
+          "navIcon": "maintenance",
+          "roles": ["admin", "superadmin", "maintenance"]
+        },
+        {
+          "id": "maintenance.loss_tracker",
+          "label": "Loss Tracker",
+          "path": "/loss-tracker",
+          "navIcon": "lossTracker",
+          "roles": ["admin", "superadmin", "supervisor", "maintenance"]
+        }
+      ]
+    },
+    {
+      "id": "alerts",
+      "label": "Alerts",
+      "navIcon": "alerts",
+      "roles": ["admin", "superadmin", "supervisor"],
+      "items": [
+        {
+          "id": "alerts.email",
+          "label": "Email Alerts",
+          "path": "/alerts/email",
+          "navIcon": "emailAlerts"
+        }
+      ]
+    },
+    {
+      "id": "operators",
+      "label": "Operators",
+      "navIcon": "users",
+      "roles": ["admin", "superadmin", "supervisor", "operator"],
+      "items": [
+        {
+          "id": "operators.management",
+          "label": "Operator Management",
+          "path": "/operators",
+          "navIcon": "users",
+          "roles": ["admin", "superadmin", "supervisor"]
+        },
+        {
+          "id": "operators.my_work_hours",
+          "label": "My Work Hours",
+          "path": "/my-work-hours",
+          "navIcon": "hourlyOutput",
+          "roles": ["admin", "superadmin", "supervisor", "operator"]
+        }
+      ]
+    },
+    {
+      "id": "settings",
+      "label": "Settings",
+      "navIcon": "settings",
+      "roles": ["admin", "superadmin"],
+      "items": [
+        {
+          "id": "settings.users",
+          "label": "Users",
+          "path": "/users",
+          "navIcon": "users",
+          "roles": ["admin", "superadmin"]
+        },
+        {
+          "id": "settings.tools",
+          "label": "Mold Management",
+          "path": "/molds",
+          "navIcon": "tools",
+          "roles": ["admin", "superadmin", "supervisor"]
+        },
+        {
+          "id": "settings.wi_revisions",
+          "label": "WI Revisions",
+          "path": "/wi-revisions",
+          "navIcon": "workInstructions",
+          "roles": ["admin", "superadmin", "supervisor"]
+        },
+        {
+          "id": "settings.machines",
+          "label": "Machines",
+          "path": "/machines",
+          "navIcon": "machines",
+          "roles": ["admin", "superadmin", "supervisor"]
+        },
+        {
+          "id": "settings.factory_setup",
+          "label": "Factory Setup",
+          "path": "/factory-setup",
+          "navIcon": "config",
+          "roles": ["superadmin"]
+        },
+        {
+          "id": "settings.configuration",
+          "label": "Configuration",
+          "path": "/config",
+          "navIcon": "config",
+          "roles": ["admin", "superadmin"]
+        },
+        {
+          "id": "settings.database_management",
+          "label": "Database Management",
+          "path": "/database-management",
+          "navIcon": "config",
+          "roles": ["superadmin"]
+        }
+      ]
+    }
+  ]
+}

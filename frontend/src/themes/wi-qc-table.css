@@ -1,0 +1,27 @@
+/**
+ * QC / WI inspection table headers — high contrast on yellow.
+ * Overrides techBlue global `th` rules (cyan + text-shadow).
+ */
+.wi-qc-th,
+[data-theme='techBlue'] .wi-qc-th,
+[data-theme='techBlue'] .titan-tech-blue-page .wi-qc-th,
+[data-theme='dark'] .wi-qc-th,
+[data-theme='light'] .wi-qc-th {
+  color: #0f172a !important;
+  text-shadow: none !important;
+  background: #fbbf24 !important;
+  border: 1px solid #b45309 !important;
+  font-weight: 700 !important;
+}
+
+.wi-qc-section-title,
+[data-theme='techBlue'] .wi-qc-section-title,
+[data-theme='techBlue'] .titan-tech-blue-page .wi-qc-section-title,
+[data-theme='dark'] .wi-qc-section-title,
+[data-theme='light'] .wi-qc-section-title {
+  color: #422006 !important;
+  text-shadow: none !important;
+  background: #fde047 !important;
+  border-bottom: 1px solid #ca8a04 !important;
+  font-weight: 700 !important;
+}

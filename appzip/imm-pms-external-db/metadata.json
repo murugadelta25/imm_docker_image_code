@@ -1,0 +1,13 @@
+{
+  "name": "imm-pms",
+  "tag": "v1",
+  "version": "v1.0.0",
+  "desc": "IMM EAP PMS — OEE, planning, dashboards (external MySQL)",
+  "service": "service.yaml",
+  "deployment": "deployment.yaml",
+  "images": [
+    {
+      "appPath": "imm-pms-v1.0.0.tar"
+    }
+  ]
+}

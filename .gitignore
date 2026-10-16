@@ -1,0 +1,72 @@
+# Python
+backend/venv/
+backend/.venv/
+backend/__pycache__/
+backend/app/__pycache__/
+backend/app/routers/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Node
+frontend/node_modules/
+frontend/dist/
+/node_modules/
+
+# Logs
+*.log
+backend.log
+frontend.log
+deploy/nginx-win/logs/
+
+# PID files
+.backend.pid
+.frontend.pid
+
+# Env / secrets (keep .env.example)
+backend/.env
+frontend/.env
+database/db.config.json
+deploy.env
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.cursor/
+.vscode/
+.claude/
+.codex/
+
+# Build / package artifacts
+*.zip
+eap-pms.zip
+*.xlsx
+
+# Database backups
+database/backups/
+
+# Dev-only bundles (not for deployment)
+bug_fixing_patch1/
+TITAN_OEE_FULL_PACKAGE/
+new_theme/
+demo/
+frontend/src/pages/gemini_*
+frontend/src/pages/old_*
+frontend/src/pages/bug_*
+
+# Bundled nginx binary (use scripts/install-nginx.sh on server)
+deploy/nginx-win/
+
+# Uploaded work-instruction PDFs (runtime data)
+backend/static/work-instructions/
+
+# Operator / user face-verification reference photos (runtime uploads via API)
+backend/static/operator-reference/*
+!backend/static/operator-reference/.gitkeep
+
+# Docker build artifacts
+*.tar
+appzip/**/*.tar
+appzip/**/*.zip
+docker/data/
+docker/.env.docker

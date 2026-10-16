@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imm-pms
+  labels:
+    app: imm-pms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: imm-pms
+  template:
+    metadata:
+      labels:
+        app: imm-pms
+    spec:
+      containers:
+        - name: imm-pms
+          image: imm-pms:v1.0.0
+          # If pushing to master registry instead of zip tar import, use e.g.:
+          # image: master:32000/imm-pms:v1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: imm-pms-config
+          volumeMounts:
+            - name: static-data
+              mountPath: /app/backend/static
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 40
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: static-data
+          emptyDir: {}
+          # Prefer PersistentVolumeClaim in production:
+          # persistentVolumeClaim:
+          #   claimName: imm-pms-static

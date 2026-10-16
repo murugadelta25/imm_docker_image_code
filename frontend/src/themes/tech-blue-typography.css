@@ -1,0 +1,95 @@
+/**
+ * Tech Blue typography — readability on translucent tiles + PMM background.
+ * Font faces: loaded via index.html (Google Fonts Roboto).
+ * new_theme/Roboto.css is NOT imported — it expects ../fonts/Roboto/*.woff2
+ * which are not bundled in this project. noto-sans-*.css is omitted (no Chinese UI).
+ */
+
+[data-theme='techBlue'] {
+  --titan-font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+  --tech-text-shadow: 0 1px 3px rgba(1, 9, 28, 0.72);
+  --tech-title-shadow: 0 1px 4px rgba(1, 9, 28, 0.85);
+  font-size: 15px;
+}
+
+[data-theme='techBlue'] body,
+[data-theme='techBlue'] .titan-app-shell {
+  font-family: var(--titan-font-family);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Page titles and section headers */
+[data-theme='techBlue'] .titan-tech-blue-page h2,
+[data-theme='techBlue'] .titan-tech-blue-page h3,
+[data-theme='techBlue'] .titan-tech-blue-page h4,
+[data-theme='techBlue'] .titan-app-bar span {
+  color: var(--title-color, #ffffff) !important;
+  font-weight: 600;
+  text-shadow: var(--tech-title-shadow);
+}
+
+/* Body copy, table cells, nav labels */
+[data-theme='techBlue'] .titan-tech-blue-page p,
+[data-theme='techBlue'] .titan-tech-blue-page td,
+[data-theme='techBlue'] .titan-tech-blue-page li,
+[data-theme='techBlue'] .titan-tech-blue-page span,
+[data-theme='techBlue'] .titan-nav-leaf {
+  text-shadow: var(--tech-text-shadow);
+}
+
+/* Form / field labels — cyan per techBlueTheme reference */
+[data-theme='techBlue'] .titan-tech-blue-page label {
+  color: var(--label-color, #22cae7) !important;
+  font-size: 12px !important;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-shadow: var(--tech-text-shadow);
+}
+
+/* Table headers */
+[data-theme='techBlue'] .titan-tech-blue-page th {
+  color: var(--text-dim, #22cae7) !important;
+  font-size: 13px !important;
+  font-weight: 700;
+  text-shadow: var(--tech-text-shadow);
+}
+
+/* Inputs — brighter text on dark fields */
+[data-theme='techBlue'] input,
+[data-theme='techBlue'] select,
+[data-theme='techBlue'] textarea,
+[data-theme='techBlue'] button {
+  font-size: 14px;
+}
+
+[data-theme='techBlue'] input,
+[data-theme='techBlue'] select,
+[data-theme='techBlue'] textarea {
+  color: #ffffff;
+  font-weight: 500;
+}
+
+/* Chart / card subtitles */
+[data-theme='techBlue'] .titan-tech-blue-page [style*='font-size: 14px'] {
+  font-size: 15px !important;
+  font-weight: 600;
+}
+
+[data-theme='techBlue'] .titan-tech-blue-page [style*='font-size: 13px'] {
+  font-size: 14px !important;
+}
+
+[data-theme='techBlue'] .titan-tech-blue-page [style*='font-size: 12px'] {
+  font-size: 13px !important;
+}
+
+[data-theme='techBlue'] .titan-tech-blue-page [style*='font-size: 11px'] {
+  font-size: 12px !important;
+}
+
+[data-theme='techBlue'] .titan-tech-blue-page [style*='color: rgb(114, 113, 113)'],
+[data-theme='techBlue'] .titan-tech-blue-page [style*='color: rgb(115, 114, 114)'] {
+  color: var(--text-muted, #d4eef8) !important;
+}

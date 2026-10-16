@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: imm-pms
+  labels:
+    app: imm-pms
+spec:
+  type: ClusterIP
+  selector:
+    app: imm-pms
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  # For factory direct access without Ingress path prefix, change to:
+  # type: NodePort
+  # ports:
+  #   - name: http
+  #     port: 80
+  #     targetPort: http
+  #     nodePort: 30040
