@@ -8,7 +8,7 @@
 # Bundled MySQL (lab):
 #   docker compose -f docker/docker-compose.yml --profile with-mysql --env-file docker/.env.docker up --build
 #
-# UI: http://localhost:8080
+# UI: http://localhost:8080  (container listens 8080)
 
 services:
   imm-pms:
@@ -20,7 +20,7 @@ services:
     image: imm-pms:v1.0.0
     container_name: imm-pms
     ports:
-      - "8080:80"
+      - "8080:8080"
     env_file:
       - path: .env.docker
         required: false

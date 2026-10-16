@@ -1,3 +1,5 @@
+# Gateway-ready: hostNetwork so pod can reach MySQL on 127.0.0.1:3306
+# nginx in image listens on 8080 (avoids clash with SIE on :80)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,15 +16,17 @@ spec:
       labels:
         app: imm-pms
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: imm-pms
           image: imm-pms:v1.0.0
-          # If pushing to master registry instead of zip tar import, use e.g.:
+          # Master registry alternative:
           # image: master:32000/imm-pms:v1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 80
+              containerPort: 8080
               protocol: TCP
           envFrom:
             - configMapRef:
@@ -34,13 +38,13 @@ spec:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 15
+            initialDelaySeconds: 20
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 40
+            initialDelaySeconds: 45
             periodSeconds: 30
           resources:
             requests:
@@ -52,6 +56,6 @@ spec:
       volumes:
         - name: static-data
           emptyDir: {}
-          # Prefer PersistentVolumeClaim in production:
+          # Prefer PVC in production:
           # persistentVolumeClaim:
           #   claimName: imm-pms-static

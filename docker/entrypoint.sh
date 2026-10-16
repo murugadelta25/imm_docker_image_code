@@ -21,7 +21,7 @@ while [ "$i" -lt 45 ]; do
   sleep 1
 done
 
-echo "[imm-pms] starting nginx on :80"
+echo "[imm-pms] starting nginx on :8080"
 nginx -g 'daemon off;' &
 NGINX_PID=$!
 

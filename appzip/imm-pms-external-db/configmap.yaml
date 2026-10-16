@@ -3,18 +3,15 @@ kind: ConfigMap
 metadata:
   name: imm-pms-config
 data:
-  # --- External MySQL (EDIT before upload / after deploy via App Management ConfigMap editor) ---
-  # URL-encode special chars in password (@ → %40)
-  DATABASE_URL: "mysql+pymysql://root:CHANGE_ME@10.151.47.6:3306/plastech_solution_imm_pms"
+  # Host MySQL (hostNetwork pod → 127.0.0.1). Password Mysql@2026 → Mysql%402026
+  DATABASE_URL: "mysql+pymysql://root:Mysql%402026@127.0.0.1:3306/plastech_solution_imm_pms"
 
-  # --- Security (EDIT — do not leave defaults in production) ---
-  SECRET_KEY: "CHANGE_ME_LONG_RANDOM"
+  SECRET_KEY: "eap_pms_Plastech_Solutions_Pune_secret"
   ACCESS_TOKEN_EXPIRE_MINUTES: "480"
-  NODE_RED_WEBHOOK_SECRET: "CHANGE_ME_WEBHOOK"
-  MACHINE_STATUS_PUSH_SECRET: "CHANGE_ME_MACHINE_PUSH"
+  NODE_RED_WEBHOOK_SECRET: ""
+  MACHINE_STATUS_PUSH_SECRET: ""
 
-  # Origins that may call the API from a browser. Use * for open LAN, or list hosts:
-  # CORS_ORIGINS: "http://10.136.217.103,http://din.eappms"
+  # Browser origins (LAN). Tighten later if needed.
   CORS_ORIGINS: "*"
 
   NODE_RED_URL: "http://127.0.0.1:1880"
