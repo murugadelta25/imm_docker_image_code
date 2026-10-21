@@ -1,0 +1,13 @@
+{
+  "name": "imm-pms",
+  "tag": "v1-mysql",
+  "version": "v1.0.0",
+  "desc": "IMM EAP PMS with MySQL sidecar in the same pod (lab/demo — use PVC for data)",
+  "service": "service.yaml",
+  "deployment": "deployment.yaml",
+  "images": [
+    {
+      "appPath": "imm-pms-v1.0.0.tar"
+    }
+  ]
+}

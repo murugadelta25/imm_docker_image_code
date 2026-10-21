@@ -254,10 +254,18 @@ export default function ProductionPlanning() {
 
   const fetchWorkOrders = useCallback(async () => {
     try {
-      const r = await api.get('/api/work-orders/');
-      setWorkOrders(r.data);
+      // Lightweight open-WO list for Add Plan dropdown (avoids heavy /work-orders/ sync timeouts)
+      const r = await api.get('/api/work-orders/options', { params: { limit: 500 } });
+      setWorkOrders(Array.isArray(r.data) ? r.data : []);
     } catch {
-      setWorkOrders([]);
+      try {
+        // Fallback: full list filtered to open statuses
+        const r = await api.get('/api/work-orders/', { params: { active_only: true } });
+        const list = Array.isArray(r.data) ? r.data : [];
+        setWorkOrders(list.filter((wo) => ['draft', 'in_progress'].includes(wo.status)));
+      } catch {
+        setWorkOrders([]);
+      }
     }
   }, []);
 

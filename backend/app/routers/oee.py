@@ -667,7 +667,6 @@ def _compute_realtime_oee_for_date(
         _break_windows, _build_status_segments,
         _countable_running_segments, _running_part_threshold_ratio,
         auto_transition_shift_plans, _shift_window,
-        sync_plan_actuals_from_status_logs,
     )
 
     enabled_shifts = [s for s in cfg.get("shifts", []) if s.get("enabled")]
@@ -678,18 +677,20 @@ def _compute_realtime_oee_for_date(
 
     _now = datetime.now()
     if sync_actuals:
+        # Light auto-transition for live shift; heavy actuals sync is backgrounded
         for sh_def in enabled_shifts:
             s_start, s_end = _shift_window(target_date, sh_def)
             if s_start <= _now < s_end:
                 auto_transition_shift_plans(db, target_date, sh_def['id'], cfg)
-
-        sync_plan_actuals_from_status_logs(
-            db,
-            entry_date=target_date,
-            machine_id=machine_id,
-            shift=shift,
-            commit=True,
-        )
+        try:
+            from ..plan_actuals_sync import schedule_plan_actuals_sync
+            schedule_plan_actuals_sync(
+                entry_date=target_date,
+                machine_id=machine_id,
+                shift=shift,
+            )
+        except Exception as exc:
+            print(f"[OEE] background plan actuals sync schedule skipped: {exc}")
 
     plan_q = db.query(ProductionPlan).filter(ProductionPlan.plan_date == target_date)
     if station_no:

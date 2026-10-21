@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -202,8 +203,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PMS Dashboard API", lifespan=lifespan)
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
-                   allow_methods=["*"], allow_headers=["*"])
+# CORS_ORIGINS=comma-separated list, or "*" (dev / LAN). Never use "*" with credentials in locked-down prod.
+_cors_raw = (os.getenv("CORS_ORIGINS") or "*").strip()
+_cors_origins = (
+    ["*"]
+    if _cors_raw == "*"
+    else [o.strip() for o in _cors_raw.split(",") if o.strip()]
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(auth.router)
 app.include_router(oee.router)

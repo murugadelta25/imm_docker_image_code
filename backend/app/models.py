@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Date, Time, DateTime, Numeric, Float, Text, Enum, ForeignKey, TIMESTAMP, Computed
+from sqlalchemy import create_engine, Column, Integer, String, Date, Time, DateTime, Numeric, Float, Text, Enum, ForeignKey, TIMESTAMP, Computed, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from dotenv import load_dotenv
@@ -120,7 +120,7 @@ class Station(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), unique=True, nullable=False)
     display_name = Column(String(100), nullable=False)
-    created_at = Column(TIMESTAMP, server_default="CURRENT_TIMESTAMP")
+    created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
 
 # Backward import alias during transition
 Pair = Station

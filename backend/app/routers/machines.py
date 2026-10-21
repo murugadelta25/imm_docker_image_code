@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from pydantic import BaseModel
@@ -435,9 +435,29 @@ async def upload_image(machine_id: int, file: UploadFile = File(...),
 
 
 @router.patch("/{machine_id}/status")
-async def push_status(machine_id: int, data: StatusPush,
-                      db: Session = Depends(get_db)):
-    """External PLC/API push — called by Node-RED, MQTT bridge, Modbus bridge."""
+async def push_status(
+    machine_id: int,
+    data: StatusPush,
+    db: Session = Depends(get_db),
+    x_machine_push_secret: Optional[str] = Header(None, alias="X-Machine-Push-Secret"),
+    x_webhook_secret: Optional[str] = Header(None, alias="X-Webhook-Secret"),
+):
+    """External PLC/API push — called by Node-RED, MQTT bridge, Modbus bridge.
+
+    When MACHINE_STATUS_PUSH_SECRET (or NODE_RED_WEBHOOK_SECRET) is set in the
+    environment, require matching X-Machine-Push-Secret or X-Webhook-Secret.
+    """
+    import os
+
+    expected = (
+        os.getenv("MACHINE_STATUS_PUSH_SECRET", "").strip()
+        or os.getenv("NODE_RED_WEBHOOK_SECRET", "").strip()
+    )
+    if expected:
+        provided = (x_machine_push_secret or x_webhook_secret or "").strip()
+        if provided != expected:
+            raise HTTPException(401, "Invalid or missing machine push secret")
+
     allowed = {"running", "idle", "breakdown", "setting_change", "alarm", "offline"}
     if data.status not in allowed:
         raise HTTPException(400, f"status must be one of {allowed}")

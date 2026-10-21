@@ -1,0 +1,68 @@
+# Local / gateway smoke-test (not required for App Management zip upload).
+#
+# External MySQL (recommended):
+#   copy .env.docker.example → .env.docker
+#   set DATABASE_URL to host MySQL (use host.docker.internal on Docker Desktop)
+#   docker compose -f docker/docker-compose.yml --env-file docker/.env.docker up --build
+#
+# Bundled MySQL (lab):
+#   docker compose -f docker/docker-compose.yml --profile with-mysql --env-file docker/.env.docker up --build
+#
+# UI: http://localhost:8080  (container listens 8080)
+
+services:
+  imm-pms:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VITE_BASE: /
+    image: imm-pms:v1.0.0
+    container_name: imm-pms
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://root:Mysql%402026@host.docker.internal:3306/plastech_solution_imm_pms}
+      SECRET_KEY: ${SECRET_KEY:-dev_only_change_me}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      NODE_RED_WEBHOOK_SECRET: ${NODE_RED_WEBHOOK_SECRET:-}
+      MACHINE_STATUS_PUSH_SECRET: ${MACHINE_STATUS_PUSH_SECRET:-}
+    volumes:
+      - imm_static:/app/backend/static
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  mysql:
+    profiles: ["with-mysql"]
+    image: mysql:8.0
+    container_name: imm-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_secret}
+      MYSQL_DATABASE: plastech_solution_imm_pms
+      MYSQL_USER: imm
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-imm_secret}
+    ports:
+      - "3307:3306"
+    volumes:
+      - imm_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot_secret"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  imm_static:
+  imm_mysql_data:

@@ -448,24 +448,22 @@ def _build_plan_achievement(db: Session, zone_rows: List[dict]) -> Tuple[dict, d
             {"id": "B", "name": "Shift B", "start": "20:00", "end": "08:00", "enabled": True},
         ]
 
-    # Throttle heavy status-log → plan.actual sync (was running on every dashboard poll)
+    # Non-blocking: queue background sync (coalesced). Never block dashboard poll.
     global _plan_sync_last
     now_mono = time.monotonic()
     if now_mono - _plan_sync_last >= _PLAN_SYNC_MIN_INTERVAL_SEC:
         with _plan_sync_lock:
             if now_mono - _plan_sync_last >= _PLAN_SYNC_MIN_INTERVAL_SEC:
                 try:
-                    from .hourly_output import sync_plan_actuals_from_status_logs
+                    from ..plan_actuals_sync import schedule_plan_actuals_sync
 
-                    sync_plan_actuals_from_status_logs(
-                        db,
+                    schedule_plan_actuals_sync(
                         date_from=entry_date - timedelta(days=1),
                         date_to=now.date(),
-                        commit=True,
                     )
                     _plan_sync_last = time.monotonic()
                 except Exception as exc:
-                    print(f"[IMM Dashboard] plan actual sync skipped: {exc}")
+                    print(f"[IMM Dashboard] background plan sync schedule skipped: {exc}")
 
     active_meta = next((s for s in enabled if str(s.get("id")) == str(shift_id)), None)
     if not active_meta:

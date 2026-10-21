@@ -1735,6 +1735,16 @@ def build_hourly_output(
         _now = now_ist()
         if s_start <= _now < s_end:
             auto_transition_shift_plans(db, entry_date, shift, cfg)
+            # Persist plan.actual_qty in background — HO itself reads status logs live
+            try:
+                from ..plan_actuals_sync import schedule_plan_actuals_sync
+                schedule_plan_actuals_sync(
+                    entry_date=entry_date,
+                    shift=shift,
+                    machine_id=machine_id,
+                )
+            except Exception as exc:
+                print(f"[HourlyOutput] background plan sync schedule skipped: {exc}")
     if not shift_def:
         return {
             'slots': [], 'machines': [], 'scope': scope,

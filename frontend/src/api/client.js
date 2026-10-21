@@ -20,34 +20,28 @@ if (inIframe()) {
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '',
-  timeout: 30000,
+  // No default here — request interceptor sets per-URL timeouts.
+  // (A fixed 30000 here previously blocked the interceptor: if (!cfg.timeout) never ran.)
 });
 
 api.interceptors.request.use(cfg => {
   const token = localStorage.getItem('token');
   if (token) cfg.headers.Authorization = `Bearer ${token}`;
-  
-  // Per-endpoint timeout strategy
-  if (!cfg.timeout) {
+
+  // Per-endpoint timeout strategy (only when caller did not set timeout)
+  if (cfg.timeout == null) {
     const url = cfg.url || '';
-    // Fast endpoints (should respond <5s): factory dashboards, trends
-    if (url.includes('/factory') || url.includes('/running-rate-trend')) {
-      cfg.timeout = 5000; // 5 sec timeout for heavy aggregations
-    }
-    // Medium endpoints (should respond <10s): zones, equipment
-    else if (url.includes('/zones') || url.includes('/equipment')) {
-      cfg.timeout = 10000; // 10 sec for zone/equipment queries
-    }
-    // Dashboard/OEE endpoints: 8 sec (quick fail)
-    else if (url.includes('/dashboard') || url.includes('/oee')) {
-      cfg.timeout = 8000;
-    }
-    // Health checks / light queries: 5 sec
-    else if (url.includes('/health') || url.includes('/status')) {
+    if (url.includes('/work-orders')) {
+      cfg.timeout = 45000; // list/track-record can be heavier
+    } else if (url.includes('/factory') || url.includes('/running-rate-trend')) {
       cfg.timeout = 5000;
-    }
-    // Default for other endpoints: 15 sec (reduced from 30)
-    else {
+    } else if (url.includes('/zones') || url.includes('/equipment')) {
+      cfg.timeout = 10000;
+    } else if (url.includes('/dashboard') || url.includes('/oee')) {
+      cfg.timeout = 8000;
+    } else if (url.includes('/health') || url.includes('/status')) {
+      cfg.timeout = 5000;
+    } else {
       cfg.timeout = 15000;
     }
   }

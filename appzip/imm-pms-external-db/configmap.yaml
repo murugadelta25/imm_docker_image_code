@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: imm-pms-config
+data:
+  # External MySQL on this Ubuntu gateway (DB already exists: plastech_solution_imm_pms).
+  # This Deployment uses hostNetwork: true → pod shares host network → 127.0.0.1 works.
+  # If you later drop hostNetwork, replace 127.0.0.1 with the gateway LAN IP the pod can reach.
+  # Password encoding: @ → %40  (example below is Mysql@2026)
+  DATABASE_URL: "mysql+pymysql://root:Mysql%402026@127.0.0.1:3306/plastech_solution_imm_pms"
+  SECRET_KEY: "eap_pms_Plastech_Solutions_Pune_secret"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "480"
+  NODE_RED_WEBHOOK_SECRET: ""
+  MACHINE_STATUS_PUSH_SECRET: ""
+  CORS_ORIGINS: "*"
+  NODE_RED_URL: "http://127.0.0.1:1880"
+  PLATFORM_ADMIN_USERNAME: "platform_admin"
+  PLATFORM_ADMIN_PASSWORD: "ChangeMe-Platform-2026!"

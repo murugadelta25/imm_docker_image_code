@@ -125,6 +125,17 @@ def _run_plan_auto_transition():
         db.close()
 
 
+def _run_plan_actuals_sync():
+    """Periodic job — refresh plan.actual_qty from status logs (yesterday + today)."""
+    from .plan_actuals_sync import run_recent_plan_actuals_sync
+    try:
+        n = run_recent_plan_actuals_sync()
+        if n:
+            print(f"[Scheduler] Plan actuals sync updated {n} plan(s)")
+    except Exception as exc:
+        print(f"[Scheduler] Plan actuals sync failed: {exc}")
+
+
 def reload_archive_schedule(db: Session):
     """Add or remove the archive backup job based on site_config.backup settings."""
     import json as _json
@@ -197,6 +208,16 @@ def reload_schedules(db: Session):
         replace_existing=True,
     )
     print("[Scheduler] Plan auto-transition every 1 minute")
+
+    # Keep plan.actual_qty fresh without blocking page GETs
+    scheduler.add_job(
+        _run_plan_actuals_sync,
+        trigger='interval',
+        minutes=2,
+        id='plan_actuals_sync',
+        replace_existing=True,
+    )
+    print("[Scheduler] Plan actuals sync every 2 minutes")
 
     reload_archive_schedule(db)
 

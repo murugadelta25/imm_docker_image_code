@@ -88,13 +88,7 @@ def _parse_spares(raw: Optional[str]) -> list:
         return []
 
 
-def _wo_stats(db: Session, wo: WorkOrder) -> dict:
-    plans = db.query(ProductionPlan).filter(
-        ProductionPlan.work_order_id == wo.id,
-        ProductionPlan.status.notin_(["cancelled", "aborted"]),
-    ).all()
-    planned_qty = sum(p.planned_qty for p in plans)
-    completed_qty = sum(p.actual_qty for p in plans)
+def _stats_dict(wo: WorkOrder, planned_qty: int, completed_qty: int, plan_count: int) -> dict:
     remaining_qty = max(wo.target_qty - completed_qty, 0)
     unplanned_qty = max(wo.target_qty - planned_qty, 0)
     pct = round(completed_qty / wo.target_qty * 100, 1) if wo.target_qty else 0
@@ -104,14 +98,82 @@ def _wo_stats(db: Session, wo: WorkOrder) -> dict:
         "remaining_qty": remaining_qty,
         "unplanned_qty": unplanned_qty,
         "complete_pct": pct,
-        "plan_count": len(plans),
+        "plan_count": plan_count,
     }
 
 
-def _serialize_wo(db: Session, wo: WorkOrder, include_plans: bool = False) -> dict:
-    part = db.query(Part).filter(Part.id == wo.part_id).first() if wo.part_id else None
-    mold = db.query(ToolStock).filter(ToolStock.id == wo.mold_id).first() if getattr(wo, "mold_id", None) else None
-    stats = _wo_stats(db, wo)
+def _wo_stats(db: Session, wo: WorkOrder) -> dict:
+    plans = db.query(ProductionPlan).filter(
+        ProductionPlan.work_order_id == wo.id,
+        ProductionPlan.status.notin_(["cancelled", "aborted"]),
+    ).all()
+    return _stats_dict(
+        wo,
+        sum(p.planned_qty for p in plans),
+        sum(p.actual_qty for p in plans),
+        len(plans),
+    )
+
+
+def _batch_wo_stats(db: Session, work_orders: list) -> dict:
+    """One GROUP BY for many WOs — avoids N+1 _wo_stats on list endpoints."""
+    if not work_orders:
+        return {}
+    by_id = {wo.id: wo for wo in work_orders}
+    rows = (
+        db.query(
+            ProductionPlan.work_order_id,
+            func.coalesce(func.sum(ProductionPlan.planned_qty), 0),
+            func.coalesce(func.sum(ProductionPlan.actual_qty), 0),
+            func.count(ProductionPlan.id),
+        )
+        .filter(
+            ProductionPlan.work_order_id.in_(list(by_id.keys())),
+            ProductionPlan.status.notin_(["cancelled", "aborted"]),
+        )
+        .group_by(ProductionPlan.work_order_id)
+        .all()
+    )
+    out = {
+        wid: _stats_dict(by_id[wid], 0, 0, 0)
+        for wid in by_id
+    }
+    for wid, pq, cq, pc in rows:
+        wo = by_id.get(wid)
+        if not wo:
+            continue
+        out[wid] = _stats_dict(wo, int(pq or 0), int(cq or 0), int(pc or 0))
+    return out
+
+
+def _desired_wo_status(wo: WorkOrder, stats: dict) -> str:
+    if wo.status == "cancelled":
+        return "cancelled"
+    if stats["completed_qty"] >= wo.target_qty:
+        return "completed"
+    if stats["plan_count"] > 0 or stats["completed_qty"] > 0:
+        return "in_progress"
+    if wo.status == "completed":
+        return "in_progress"
+    return wo.status
+
+
+def _serialize_wo(
+    db: Session,
+    wo: WorkOrder,
+    include_plans: bool = False,
+    *,
+    part: Optional[Part] = None,
+    mold: Optional[ToolStock] = None,
+    stats: Optional[dict] = None,
+    machines: Optional[dict] = None,
+) -> dict:
+    if part is None and wo.part_id:
+        part = db.query(Part).filter(Part.id == wo.part_id).first()
+    if mold is None and getattr(wo, "mold_id", None):
+        mold = db.query(ToolStock).filter(ToolStock.id == wo.mold_id).first()
+    if stats is None:
+        stats = _wo_stats(db, wo)
     mold_label = _mold_label(mold) if mold else None
     out = {
         "id": wo.id,
@@ -137,7 +199,8 @@ def _serialize_wo(db: Session, wo: WorkOrder, include_plans: bool = False) -> di
         plans = db.query(ProductionPlan).filter(
             ProductionPlan.work_order_id == wo.id
         ).order_by(ProductionPlan.plan_date, ProductionPlan.shift).all()
-        machines = {m.id: m for m in db.query(Machine).all()}
+        if machines is None:
+            machines = {m.id: m for m in db.query(Machine).all()}
         out["plans"] = [_serialize_plan(p, machines) for p in plans]
     return out
 
@@ -168,13 +231,10 @@ def _sync_wo_status(db: Session, wo_id: int):
     if not wo or wo.status == "cancelled":
         return
     stats = _wo_stats(db, wo)
-    if stats["completed_qty"] >= wo.target_qty:
-        wo.status = "completed"
-    elif stats["plan_count"] > 0 or stats["completed_qty"] > 0:
-        wo.status = "in_progress"
-    elif wo.status == "completed":
-        wo.status = "in_progress"
-    wo.updated_at = now_ist()
+    desired = _desired_wo_status(wo, stats)
+    if wo.status != desired:
+        wo.status = desired
+        wo.updated_at = now_ist()
 
 
 def _apply_wo_date_range(q, date_from: Optional[date], date_to: Optional[date]):
@@ -305,24 +365,32 @@ def list_work_orders(
         q = _apply_wo_date_range(q, date_from, date_to)
     orders = q.order_by(WorkOrder.start_date.desc(), WorkOrder.id.desc()).all()
 
-    # Sync plan actuals from machine running count before rolling up WO completed qty
-    try:
-        from .hourly_output import sync_plan_actuals_from_status_logs
-        sync_plan_actuals_from_status_logs(
-            db,
-            date_from=date_from,
-            date_to=date_to,
-            commit=True,
-        )
-    except Exception as exc:
-        print(f"[WorkOrders] actual sync skipped: {exc}")
-
-    for wo in orders:
-        _sync_wo_status(db, wo.id)
-    db.commit()
+    # Do NOT call sync_plan_actuals_from_status_logs or per-row _sync_wo_status here.
+    # Both are too heavy for list/dropdown GETs and caused 30s browser cancellations
+    # (Add Plan "Select work order" showed empty). Status/actuals refresh elsewhere.
     if active_only:
         orders = [wo for wo in orders if wo.status in ("draft", "in_progress")]
-    return [_serialize_wo(db, wo) for wo in orders]
+    if not orders:
+        return []
+    stats_map = _batch_wo_stats(db, orders)
+    part_ids = {wo.part_id for wo in orders if wo.part_id}
+    mold_ids = {getattr(wo, "mold_id", None) for wo in orders if getattr(wo, "mold_id", None)}
+    parts = {
+        p.id: p for p in db.query(Part).filter(Part.id.in_(part_ids)).all()
+    } if part_ids else {}
+    molds = {
+        m.id: m for m in db.query(ToolStock).filter(ToolStock.id.in_(mold_ids)).all()
+    } if mold_ids else {}
+    return [
+        _serialize_wo(
+            db,
+            wo,
+            part=parts.get(wo.part_id),
+            mold=molds.get(getattr(wo, "mold_id", None)),
+            stats=stats_map.get(wo.id),
+        )
+        for wo in orders
+    ]
 
 
 @router.get("/overview")
@@ -359,14 +427,30 @@ def work_order_overview(
     ))
     orders = q.order_by(WorkOrder.start_date, WorkOrder.id).all()
     machines = {m.id: m for m in db.query(Machine).all()}
+    stats_map = _batch_wo_stats(db, orders)
+
+    plans_by_wo: dict = {wo.id: [] for wo in orders}
+    if orders:
+        all_plans = db.query(ProductionPlan).filter(
+            ProductionPlan.work_order_id.in_([wo.id for wo in orders]),
+            ProductionPlan.status != "cancelled",
+        ).all()
+        for p in all_plans:
+            plans_by_wo.setdefault(p.work_order_id, []).append(p)
+
+    part_ids = {wo.part_id for wo in orders if wo.part_id}
+    mold_ids = {getattr(wo, "mold_id", None) for wo in orders if getattr(wo, "mold_id", None)}
+    parts = {
+        p.id: p for p in db.query(Part).filter(Part.id.in_(part_ids)).all()
+    } if part_ids else {}
+    molds = {
+        m.id: m for m in db.query(ToolStock).filter(ToolStock.id.in_(mold_ids)).all()
+    } if mold_ids else {}
 
     items = []
     for wo in orders:
-        stats = _wo_stats(db, wo)
-        plans = db.query(ProductionPlan).filter(
-            ProductionPlan.work_order_id == wo.id,
-            ProductionPlan.status != "cancelled",
-        ).all()
+        stats = stats_map.get(wo.id) or _stats_dict(wo, 0, 0, 0)
+        plans = plans_by_wo.get(wo.id, [])
         plan_dates = [p.plan_date for p in plans]
         bar_start = min(plan_dates) if plan_dates else wo.start_date
         bar_end = max(plan_dates) if plan_dates else wo.end_date
@@ -398,8 +482,8 @@ def work_order_overview(
                 "complete_pct": pct,
             })
 
-        part = db.query(Part).filter(Part.id == wo.part_id).first() if wo.part_id else None
-        mold = db.query(ToolStock).filter(ToolStock.id == wo.mold_id).first() if getattr(wo, "mold_id", None) else None
+        part = parts.get(wo.part_id)
+        mold = molds.get(getattr(wo, "mold_id", None))
         items.append({
             "id": wo.id,
             "work_order_no": wo.work_order_no,
@@ -424,6 +508,88 @@ def work_order_overview(
         "today": str(today),
         "items": items,
     }
+
+
+@router.get("/options")
+def work_order_options(
+    search: Optional[str] = None,
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Lightweight open work orders for Add Plan / dropdowns (no heavy sync)."""
+    q = db.query(WorkOrder).filter(WorkOrder.status.in_(("draft", "in_progress")))
+    if search:
+        like = f"%{search}%"
+        q = q.filter(or_(
+            WorkOrder.work_order_no.ilike(like),
+            WorkOrder.model_variant.ilike(like),
+            WorkOrder.description.ilike(like),
+        ))
+    orders = q.order_by(WorkOrder.start_date.desc(), WorkOrder.id.desc()).limit(limit).all()
+
+    # Batch mold / part lookups to keep this endpoint fast
+    mold_ids = {wo.mold_id for wo in orders if getattr(wo, "mold_id", None)}
+    part_ids = {wo.part_id for wo in orders if wo.part_id}
+    molds = {
+        m.id: m for m in db.query(ToolStock).filter(ToolStock.id.in_(mold_ids)).all()
+    } if mold_ids else {}
+    parts = {
+        p.id: p for p in db.query(Part).filter(Part.id.in_(part_ids)).all()
+    } if part_ids else {}
+
+    # One query for plan rollups instead of N per-WO queries
+    wo_ids = [wo.id for wo in orders]
+    plan_rows = []
+    if wo_ids:
+        plan_rows = (
+            db.query(
+                ProductionPlan.work_order_id,
+                func.coalesce(func.sum(ProductionPlan.planned_qty), 0),
+                func.coalesce(func.sum(ProductionPlan.actual_qty), 0),
+            )
+            .filter(
+                ProductionPlan.work_order_id.in_(wo_ids),
+                ProductionPlan.status.notin_(["cancelled", "aborted"]),
+            )
+            .group_by(ProductionPlan.work_order_id)
+            .all()
+        )
+    stats_by_wo = {
+        wid: {"planned_qty": int(pq or 0), "completed_qty": int(aq or 0)}
+        for wid, pq, aq in plan_rows
+    }
+
+    out = []
+    for wo in orders:
+        mold = molds.get(getattr(wo, "mold_id", None))
+        part = parts.get(wo.part_id)
+        mold_label = _mold_label(mold) if mold else None
+        st = stats_by_wo.get(wo.id, {"planned_qty": 0, "completed_qty": 0})
+        completed = st["completed_qty"]
+        planned = st["planned_qty"]
+        out.append({
+            "id": wo.id,
+            "work_order_no": wo.work_order_no,
+            "mold_id": getattr(wo, "mold_id", None),
+            "mold_code": mold.tool_code if mold else None,
+            "mold_name": mold.tool_name if mold else None,
+            "mold_label": mold_label,
+            "part_id": wo.part_id,
+            "part_no": (part.part_no if part else None) or (getattr(mold, "part_no", None) if mold else None),
+            "model_variant": wo.model_variant or mold_label or (part.model_variant if part else None),
+            "description": wo.description,
+            "target_qty": wo.target_qty,
+            "start_date": str(wo.start_date) if wo.start_date else None,
+            "end_date": str(wo.end_date) if wo.end_date else None,
+            "status": wo.status,
+            "planned_qty": planned,
+            "completed_qty": completed,
+            "remaining_qty": max(wo.target_qty - completed, 0),
+            "unplanned_qty": max(wo.target_qty - planned, 0),
+            "complete_pct": round(completed / wo.target_qty * 100, 1) if wo.target_qty else 0,
+        })
+    return out
 
 
 @router.get("/planned")
@@ -460,32 +626,6 @@ def list_planned_work_orders(
     for p in plans:
         by_wo.setdefault(p.work_order_id, []).append(p)
 
-    items = []
-    seen_ids = set()
-
-    for wo_id, wo_plans in by_wo.items():
-        wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
-        if not wo or wo.status in ("completed", "cancelled"):
-            continue
-        _sync_wo_status(db, wo.id)
-        if wo.status in ("completed", "cancelled"):
-            continue
-        stats = _wo_stats(db, wo)
-        if stats["completed_qty"] >= wo.target_qty:
-            continue
-        future_plans = [_serialize_plan(p, machines) for p in wo_plans]
-        future_qty = sum(p.planned_qty - p.actual_qty for p in wo_plans)
-        items.append({
-            **_serialize_wo(db, wo),
-            "future_plans": future_plans,
-            "future_plan_count": len(future_plans),
-            "future_planned_qty": future_qty,
-            "next_plan_date": future_plans[0]["plan_date"] if future_plans else None,
-            "unplanned_qty": stats["unplanned_qty"],
-            "schedule_only": False,
-        })
-        seen_ids.add(wo_id)
-
     # Future-scheduled work orders with no production plans yet (WO period in range, start in future)
     wo_q = db.query(WorkOrder).filter(
         WorkOrder.status.notin_(["completed", "cancelled"]),
@@ -501,18 +641,87 @@ def list_planned_work_orders(
             WorkOrder.model_variant.ilike(like),
             WorkOrder.description.ilike(like),
         ))
+    schedule_only_wos = wo_q.order_by(WorkOrder.start_date, WorkOrder.id).all()
 
-    for wo in wo_q.order_by(WorkOrder.start_date, WorkOrder.id).all():
-        if wo.id in seen_ids:
+    plan_wo_ids = list(by_wo.keys())
+    plan_wos = (
+        db.query(WorkOrder).filter(WorkOrder.id.in_(plan_wo_ids)).all()
+        if plan_wo_ids else []
+    )
+    all_candidate_wos = list({wo.id: wo for wo in (plan_wos + schedule_only_wos)}.values())
+    stats_map = _batch_wo_stats(db, all_candidate_wos)
+    part_ids = {wo.part_id for wo in all_candidate_wos if wo.part_id}
+    mold_ids = {
+        getattr(wo, "mold_id", None)
+        for wo in all_candidate_wos
+        if getattr(wo, "mold_id", None)
+    }
+    parts = {
+        p.id: p for p in db.query(Part).filter(Part.id.in_(part_ids)).all()
+    } if part_ids else {}
+    molds = {
+        m.id: m for m in db.query(ToolStock).filter(ToolStock.id.in_(mold_ids)).all()
+    } if mold_ids else {}
+    wos_by_id = {wo.id: wo for wo in all_candidate_wos}
+
+    items = []
+    seen_ids = set()
+    status_dirty = False
+
+    for wo_id, wo_plans in by_wo.items():
+        wo = wos_by_id.get(wo_id)
+        if not wo or wo.status in ("completed", "cancelled"):
             continue
-        _sync_wo_status(db, wo.id)
+        stats = stats_map.get(wo_id) or _stats_dict(wo, 0, 0, 0)
+        desired = _desired_wo_status(wo, stats)
+        if wo.status != desired:
+            wo.status = desired
+            wo.updated_at = now_ist()
+            status_dirty = True
         if wo.status in ("completed", "cancelled"):
             continue
-        stats = _wo_stats(db, wo)
+        if stats["completed_qty"] >= wo.target_qty:
+            continue
+        future_plans = [_serialize_plan(p, machines) for p in wo_plans]
+        future_qty = sum(p.planned_qty - p.actual_qty for p in wo_plans)
+        items.append({
+            **_serialize_wo(
+                db,
+                wo,
+                part=parts.get(wo.part_id),
+                mold=molds.get(getattr(wo, "mold_id", None)),
+                stats=stats,
+            ),
+            "future_plans": future_plans,
+            "future_plan_count": len(future_plans),
+            "future_planned_qty": future_qty,
+            "next_plan_date": future_plans[0]["plan_date"] if future_plans else None,
+            "unplanned_qty": stats["unplanned_qty"],
+            "schedule_only": False,
+        })
+        seen_ids.add(wo_id)
+
+    for wo in schedule_only_wos:
+        if wo.id in seen_ids:
+            continue
+        stats = stats_map.get(wo.id) or _stats_dict(wo, 0, 0, 0)
+        desired = _desired_wo_status(wo, stats)
+        if wo.status != desired:
+            wo.status = desired
+            wo.updated_at = now_ist()
+            status_dirty = True
+        if wo.status in ("completed", "cancelled"):
+            continue
         if stats["completed_qty"] >= wo.target_qty:
             continue
         items.append({
-            **_serialize_wo(db, wo),
+            **_serialize_wo(
+                db,
+                wo,
+                part=parts.get(wo.part_id),
+                mold=molds.get(getattr(wo, "mold_id", None)),
+                stats=stats,
+            ),
             "future_plans": [],
             "future_plan_count": 0,
             "future_planned_qty": 0,
@@ -522,7 +731,8 @@ def list_planned_work_orders(
         })
         seen_ids.add(wo.id)
 
-    db.commit()
+    if status_dirty:
+        db.commit()
     items.sort(key=lambda x: (x["next_plan_date"] or "", x["work_order_no"]))
     return {
         "today": str(today),
@@ -771,15 +981,13 @@ def get_work_order(wo_id: int, db: Session = Depends(get_db), _=Depends(get_curr
     if not wo:
         raise HTTPException(404, "Work order not found")
     try:
-        from .hourly_output import sync_plan_actuals_from_status_logs
-        sync_plan_actuals_from_status_logs(
-            db,
+        from ..plan_actuals_sync import schedule_plan_actuals_sync
+        schedule_plan_actuals_sync(
             date_from=wo.start_date,
             date_to=wo.end_date or now_ist().date(),
-            commit=True,
         )
     except Exception as exc:
-        print(f"[WorkOrders] detail actual sync skipped: {exc}")
+        print(f"[WorkOrders] detail background sync schedule skipped: {exc}")
     return _serialize_wo(db, wo, include_plans=True)
 
 
@@ -788,19 +996,26 @@ def track_record(wo_id: int, db: Session = Depends(get_db), _=Depends(get_curren
     wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
     if not wo:
         raise HTTPException(404, "Work order not found")
-    try:
-        from .hourly_output import sync_plan_actuals_from_status_logs
-        sync_plan_actuals_from_status_logs(
-            db,
-            date_from=wo.start_date,
-            date_to=wo.end_date or now_ist().date(),
-            commit=True,
-        )
-    except Exception as exc:
-        print(f"[WorkOrders] track-record actual sync skipped: {exc}")
     plans = db.query(ProductionPlan).filter(
         ProductionPlan.work_order_id == wo_id,
     ).order_by(ProductionPlan.plan_date.desc(), ProductionPlan.shift).all()
+
+    # Schedule scoped background sync — never block track-record GET
+    try:
+        from ..plan_actuals_sync import schedule_plan_actuals_sync
+        machine_ids = sorted({p.machine_id for p in plans if p.machine_id})
+        plan_dates = [p.plan_date for p in plans if p.plan_date]
+        if machine_ids and plan_dates:
+            df = min(plan_dates)
+            dt = max(plan_dates)
+            today = now_ist().date()
+            if (dt - df).days > 14:
+                df = max(df, today - timedelta(days=14))
+            for mid in machine_ids:
+                schedule_plan_actuals_sync(date_from=df, date_to=dt, machine_id=mid)
+    except Exception as exc:
+        print(f"[WorkOrders] track-record background sync schedule skipped: {exc}")
+
     machines = {m.id: m for m in db.query(Machine).all()}
     stats = _wo_stats(db, wo)
 

@@ -349,13 +349,18 @@ function AppRoutes() {
   );
 }
 
+const routerBasename = (() => {
+  const raw = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
+  return raw || undefined
+})()
+
 export default function App() {
   return (
     <ThemeProvider>
       <FeatureFlagsProvider>
         <PlatformAuthProvider>
           <AuthProvider>
-            <BrowserRouter>
+            <BrowserRouter basename={routerBasename}>
               <BrandingProvider>
                 <EmbedProvider>
                   <ConfigProvider>

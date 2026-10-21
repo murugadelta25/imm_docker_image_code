@@ -25,7 +25,12 @@ const sharedServer = {
   },
 }
 
+// App Management Ingress: build with VITE_BASE=/app/imm-pms/v1/imm-pms/
+// NodePort / local Docker: VITE_BASE=/ (default)
+const base = process.env.VITE_BASE || '/'
+
 export default defineConfig({
+  base,
   plugins: [react()],
   server: sharedServer,
   preview: sharedServer,

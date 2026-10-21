@@ -327,24 +327,22 @@ def get_plans(
     if status:     q = q.filter(ProductionPlan.status == status)
     plans = q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
 
-    # Keep plan.actual_qty aligned with dashboard running-part count
+    # Non-blocking: refresh actuals in background (GET must stay fast)
     try:
-        from .hourly_output import sync_plan_actuals_from_status_logs
-        sync_kwargs = {"commit": True}
+        from ..plan_actuals_sync import schedule_plan_actuals_sync
+        sk: dict = {}
         if plan_date:
-            sync_kwargs["entry_date"] = plan_date
+            sk["entry_date"] = plan_date
         else:
             if date_from or week_start:
-                sync_kwargs["date_from"] = date_from or week_start
+                sk["date_from"] = date_from or week_start
             if date_to or week_end:
-                sync_kwargs["date_to"] = date_to or week_end
+                sk["date_to"] = date_to or week_end
         if shift:
-            sync_kwargs["shift"] = shift
-        sync_plan_actuals_from_status_logs(db, **sync_kwargs)
-        # Re-query so response reflects synced actuals
-        plans = q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
+            sk["shift"] = shift
+        schedule_plan_actuals_sync(**sk)
     except Exception as exc:
-        print(f"[Plans] actual sync skipped: {exc}")
+        print(f"[Plans] background actual sync schedule skipped: {exc}")
 
     return [_plan_dict(p, db) for p in plans]
 
@@ -373,22 +371,22 @@ def get_summary(
     if date_from:  q = q.filter(ProductionPlan.plan_date >= date_from)
     if date_to:    q = q.filter(ProductionPlan.plan_date <= date_to)
 
-    # Sync running-part counts into plan.actual_qty so tiles match dashboard
+    # Non-blocking background refresh — summary uses persisted actual_qty
     try:
-        from .hourly_output import sync_plan_actuals_from_status_logs
-        sync_kwargs = {"commit": True}
+        from ..plan_actuals_sync import schedule_plan_actuals_sync
+        sk: dict = {}
         if plan_date:
-            sync_kwargs["entry_date"] = plan_date
+            sk["entry_date"] = plan_date
         else:
             if date_from or week_start:
-                sync_kwargs["date_from"] = date_from or week_start
+                sk["date_from"] = date_from or week_start
             if date_to or week_end:
-                sync_kwargs["date_to"] = date_to or week_end
+                sk["date_to"] = date_to or week_end
         if shift:
-            sync_kwargs["shift"] = shift
-        sync_plan_actuals_from_status_logs(db, **sync_kwargs)
+            sk["shift"] = shift
+        schedule_plan_actuals_sync(**sk)
     except Exception as exc:
-        print(f"[Plans] summary actual sync skipped: {exc}")
+        print(f"[Plans] summary background sync schedule skipped: {exc}")
 
     plans = q.all()
     total_planned = sum(p.planned_qty for p in plans)
