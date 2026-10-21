@@ -31,8 +31,10 @@ if ! kill -0 "$API_PID" 2>/dev/null; then
   exit 1
 fi
 
-echo "[imm-pms] starting nginx on :8080 (API upstream 127.0.0.1:${API_PORT})"
-# Keep nginx.conf in sync: upstream must match API_PORT (default 18040)
+# UI port (not 8080): hostNetwork often already has something on :8080
+HTTP_PORT="${IMM_HTTP_PORT:-18080}"
+echo "[imm-pms] starting nginx on :${HTTP_PORT} (API upstream 127.0.0.1:${API_PORT})"
+# Keep nginx.conf listen port in sync with HTTP_PORT (default 18080)
 nginx -g 'daemon off;' &
 NGINX_PID=$!
 

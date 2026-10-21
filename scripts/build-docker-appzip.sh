@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 IMAGE_NAME="${IMAGE_NAME:-imm-pms}"
-IMAGE_TAG="${IMAGE_TAG:-v1.0.1}"
+IMAGE_TAG="${IMAGE_TAG:-v1.0.2}"
 VITE_BASE="${VITE_BASE:-/}"
 VARIANT="${VARIANT:-external-db}"  # external-db | with-mysql
 

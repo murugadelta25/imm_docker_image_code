@@ -11,7 +11,7 @@
 #>
 param(
   [string]$ImageName = "imm-pms",
-  [string]$ImageTag = "v1.0.1",
+  [string]$ImageTag = "v1.0.2",
   [string]$ViteBase = "/",
   [ValidateSet("external-db", "with-mysql")]
   [string]$Variant = "external-db"

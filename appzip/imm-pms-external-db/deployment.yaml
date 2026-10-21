@@ -18,11 +18,11 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: imm-pms
-          image: imm-pms:v1.0.1
+          image: imm-pms:v1.0.2
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 18080
               protocol: TCP
           envFrom:
             - configMapRef:
@@ -33,13 +33,13 @@ spec:
           readinessProbe:
             httpGet:
               path: /health
-              port: 8080
+              port: 18080
             initialDelaySeconds: 20
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
-              port: 8080
+              port: 18080
             initialDelaySeconds: 45
             periodSeconds: 30
           resources:

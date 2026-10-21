@@ -75,9 +75,9 @@ ENV DATABASE_URL="" \
     PLATFORM_ADMIN_USERNAME="platform_admin" \
     PLATFORM_ADMIN_PASSWORD="ChangeMe-Platform-2026!"
 
-EXPOSE 8080
+EXPOSE 18080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD wget -q -O /dev/null http://127.0.0.1:8080/health || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:18080/health || exit 1
 
 WORKDIR /app/backend
 ENTRYPOINT ["/entrypoint.sh"]

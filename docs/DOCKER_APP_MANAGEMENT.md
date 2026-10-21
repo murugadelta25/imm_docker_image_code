@@ -17,7 +17,7 @@ Software-architecture packaging for deploying **IMM PMS** on an SIE / EAP+ **Ubu
 Browser / Ingress / NodePort
         │
         ▼
-   nginx :8080  (in imm-pms container; avoids host :80 clash with hostNetwork)
+   nginx :18080  (in imm-pms container; avoids host :80 / :8080 clash with hostNetwork)
     ├─ /           → React SPA
     ├─ /api /ws /static /health → uvicorn 127.0.0.1:18040
         │
@@ -25,7 +25,7 @@ Browser / Ingress / NodePort
    MySQL (external host OR sidecar 127.0.0.1:3306)
 ```
 
-**CrashLoop tip (hostNetwork):** Do **not** bind the in-container API to host `:8040` if bare-metal IMM is already running there. The image uses **18040** internally; UI stays on **8080**.
+**CrashLoop tip (hostNetwork):** Do **not** bind to host `:8040` / `:8080` if other services already use them. The image uses API **18040** and UI **18080**.
 
 **Can the database live inside the application image?**  
 **No — not recommended.** Putting MySQL *inside the same Docker image filesystem* loses all data when the container is replaced. Valid options:
@@ -79,7 +79,7 @@ docker compose -f docker/docker-compose.yml up --build
 docker compose -f docker/docker-compose.yml --profile with-mysql up --build
 ```
 
-Open: `http://localhost:8080`
+Open: `http://localhost:18080`
 
 ---
 
